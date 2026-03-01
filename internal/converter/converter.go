@@ -216,20 +216,65 @@ func normalizeToolCall(name string, input map[string]any) (string, map[string]an
 	if input == nil {
 		input = map[string]any{}
 	}
-	if strings.EqualFold(strings.TrimSpace(name), "bash") {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "bash":
 		cmdRaw, has := input["command"]
 		if !has {
 			return "shell", input
 		}
 		switch cmd := cmdRaw.(type) {
 		case string:
-			return "shell", map[string]any{"command": []any{"bash", "-lc", cmd}}
+			out := map[string]any{"command": []any{"bash", "-lc", cmd}}
+			if desc := strings.TrimSpace(asString(input["description"])); desc != "" {
+				out["description"] = desc
+			}
+			return "shell", out
 		case []any:
 			return "shell", map[string]any{"command": cmd}
 		default:
 			b, _ := json.Marshal(cmdRaw)
 			return "shell", map[string]any{"command": []any{"bash", "-lc", string(b)}}
 		}
+	case "glob":
+		out := map[string]any{}
+		if pattern := strings.TrimSpace(asString(input["pattern"])); pattern != "" {
+			out["pattern"] = pattern
+		}
+		if path := strings.TrimSpace(asString(input["path"])); path != "" {
+			out["path"] = path
+		}
+		if len(out) == 0 {
+			return "glob", input
+		}
+		return "glob", out
+	case "read":
+		out := map[string]any{}
+		if path := strings.TrimSpace(asString(input["file_path"])); path != "" {
+			out["path"] = path
+		} else if path := strings.TrimSpace(asString(input["path"])); path != "" {
+			out["path"] = path
+		}
+		if offset, ok := input["offset"]; ok {
+			out["offset"] = offset
+		}
+		if limit, ok := input["limit"]; ok {
+			out["limit"] = limit
+		}
+		if len(out) == 0 {
+			return "read_file", input
+		}
+		return "read_file", out
 	}
 	return strings.TrimSpace(name), input
+}
+
+func asString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case fmt.Stringer:
+		return x.String()
+	default:
+		return ""
+	}
 }

@@ -78,3 +78,77 @@ func TestConvertMappingPairingAndOrphans(t *testing.T) {
 		t.Fatalf("missing expected conversion artifacts: shell=%v output=%v synthetic=%v orphan=%v\nitems=%+v", sawShell, sawOutput, sawSynthetic, sawOrphan, out.Items)
 	}
 }
+
+func TestConvertNormalizesClaudeToolCallNamesAndArgs(t *testing.T) {
+	ts := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	ir := session.SessionIR{
+		SourceID:  "sess-tools",
+		CWD:       "/repo",
+		StartedAt: ts,
+		OrderedEvents: []session.Event{
+			{Kind: session.EventToolCall, Call: &session.ToolCall{SourceID: "toolu_glob", Name: "Glob", Input: map[string]any{"pattern": "**/*.go", "path": "/repo"}, Timestamp: ts.Add(time.Second), Index: 1}},
+			{Kind: session.EventToolResult, Result: &session.ToolResult{CallSourceID: "toolu_glob", Output: "a.go\nb.go", Timestamp: ts.Add(2 * time.Second)}},
+			{Kind: session.EventToolCall, Call: &session.ToolCall{SourceID: "toolu_read", Name: "Read", Input: map[string]any{"file_path": "/repo/go.mod"}, Timestamp: ts.Add(3 * time.Second), Index: 2}},
+			{Kind: session.EventToolResult, Result: &session.ToolResult{CallSourceID: "toolu_read", Output: "module example", Timestamp: ts.Add(4 * time.Second)}},
+			{Kind: session.EventToolCall, Call: &session.ToolCall{SourceID: "toolu_bash", Name: "Bash", Input: map[string]any{"command": "git status --short", "description": "show status"}, Timestamp: ts.Add(5 * time.Second), Index: 3}},
+			{Kind: session.EventToolResult, Result: &session.ToolResult{CallSourceID: "toolu_bash", Output: "", Timestamp: ts.Add(6 * time.Second)}},
+		},
+	}
+
+	conv := &Converter{
+		IDGen: &fakeGen{ids: []string{
+			"call_111111111111111111111111",
+			"call_222222222222222222222222",
+			"call_333333333333333333333333",
+		}},
+		Now: func() time.Time { return ts },
+	}
+	out, err := conv.Convert(context.Background(), ir)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+
+	calls := map[string]session.CodexItem{}
+	for _, it := range out.Items {
+		if it.Kind == session.CodexItemFunctionCall {
+			calls[it.CallID] = it
+		}
+	}
+
+	globCall, ok := calls["call_111111111111111111111111"]
+	if !ok {
+		t.Fatalf("missing glob call: %+v", out.Items)
+	}
+	if globCall.Name != "glob" {
+		t.Fatalf("glob name mismatch: %q", globCall.Name)
+	}
+	if globCall.Arguments["pattern"] != "**/*.go" || globCall.Arguments["path"] != "/repo" {
+		t.Fatalf("glob args mismatch: %#v", globCall.Arguments)
+	}
+
+	readCall, ok := calls["call_222222222222222222222222"]
+	if !ok {
+		t.Fatalf("missing read call: %+v", out.Items)
+	}
+	if readCall.Name != "read_file" {
+		t.Fatalf("read name mismatch: %q", readCall.Name)
+	}
+	if readCall.Arguments["path"] != "/repo/go.mod" {
+		t.Fatalf("read args mismatch: %#v", readCall.Arguments)
+	}
+
+	bashCall, ok := calls["call_333333333333333333333333"]
+	if !ok {
+		t.Fatalf("missing bash call: %+v", out.Items)
+	}
+	if bashCall.Name != "shell" {
+		t.Fatalf("bash name mismatch: %q", bashCall.Name)
+	}
+	cmd, ok := bashCall.Arguments["command"].([]any)
+	if !ok || len(cmd) != 3 || cmd[0] != "bash" || cmd[1] != "-lc" || cmd[2] != "git status --short" {
+		t.Fatalf("bash command args mismatch: %#v", bashCall.Arguments)
+	}
+	if bashCall.Arguments["description"] != "show status" {
+		t.Fatalf("bash description missing: %#v", bashCall.Arguments)
+	}
+}

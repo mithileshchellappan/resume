@@ -107,3 +107,36 @@ func TestLoaderFallbackWithoutSessionsIndex(t *testing.T) {
 		t.Fatalf("unexpected messages: %+v", ir.Messages)
 	}
 }
+
+func TestLoaderStripsToolUseErrorWrapper(t *testing.T) {
+	home := t.TempDir()
+	projectDir := filepath.Join(home, "projects", "proj-errors")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionPath := filepath.Join(projectDir, "sess-errors.jsonl")
+
+	sessionContent := "" +
+		`{"type":"assistant","timestamp":"2026-03-01T07:46:39Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"git log --oneline -5"}}]}}` + "\n" +
+		`{"type":"user","timestamp":"2026-03-01T07:46:40Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"<tool_use_error>Sibling tool call errored</tool_use_error>","is_error":true}]}}` + "\n"
+	if err := os.WriteFile(sessionPath, []byte(sessionContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	indexJSON := `{"version":1,"entries":[{"sessionId":"sess-errors","fullPath":"` + sessionPath + `"}]}`
+	if err := os.WriteFile(filepath.Join(projectDir, "sessions-index.json"), []byte(indexJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewLoader(home)
+	ir, err := loader.LoadBySessionID(context.Background(), "sess-errors")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(ir.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(ir.Results))
+	}
+	if got, want := ir.Results[0].Output, "Sibling tool call errored"; got != want {
+		t.Fatalf("wrapped tool error should be stripped: got %q want %q", got, want)
+	}
+}

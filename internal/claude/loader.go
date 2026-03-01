@@ -335,7 +335,7 @@ func parseContentItem(item map[string]any) []contentItem {
 func parseToolResultContent(v any) string {
 	switch x := v.(type) {
 	case string:
-		return x
+		return normalizeToolResultString(x)
 	case []any:
 		parts := make([]string, 0, len(x))
 		for _, e := range x {
@@ -365,6 +365,16 @@ func parseToolResultContent(v any) string {
 		b, _ := json.Marshal(v)
 		return string(b)
 	}
+}
+
+func normalizeToolResultString(s string) string {
+	s = strings.TrimSpace(s)
+	const open = "<tool_use_error>"
+	const close = "</tool_use_error>"
+	if strings.HasPrefix(s, open) && strings.HasSuffix(s, close) {
+		s = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(s, open), close))
+	}
+	return s
 }
 
 func asString(v any) string {
