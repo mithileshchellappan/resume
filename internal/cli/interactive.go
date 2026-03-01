@@ -249,7 +249,7 @@ func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "pgup":
-			step := max(1, m.visibleRows()/2)
+			step := max(1, m.visibleEntries()/2)
 			m.cursor -= step
 			if m.cursor < 0 {
 				m.cursor = 0
@@ -257,7 +257,7 @@ func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ensureCursorVisible()
 			return m, nil
 		case "pgdown":
-			step := max(1, m.visibleRows()/2)
+			step := max(1, m.visibleEntries()/2)
 			m.cursor += step
 			if m.cursor >= len(m.filtered) {
 				m.cursor = len(m.filtered) - 1
@@ -284,6 +284,7 @@ func (m pickerModel) View() string {
 	subtleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	selectedTitleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117"))
 	selectedMarkerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117"))
+	selectedRowStyle := lipgloss.NewStyle().Background(lipgloss.Color("236"))
 	titleStyle := lipgloss.NewStyle().Bold(true)
 
 	width := m.width
@@ -309,29 +310,34 @@ func (m pickerModel) View() string {
 		Render(m.search.View())
 
 	var body strings.Builder
-	rows := m.visibleRows()
-	if rows <= 0 {
-		rows = 8
+	entries := m.visibleEntries()
+	if entries <= 0 {
+		entries = 5
 	}
 
 	if len(m.filtered) == 0 {
 		body.WriteString(subtleStyle.Render("No sessions match your search."))
 	} else {
 		start := m.offset
-		end := min(len(m.filtered), start+rows)
+		end := min(len(m.filtered), start+entries)
 		for i := start; i < end; i++ {
 			option := m.all[m.filtered[i]]
 			marker := "  "
-			primary := titleStyle.Render(truncateToWidth(option.Primary, contentWidth-4))
+			primaryText := truncateToWidth(option.Primary, contentWidth-6)
+			primary := titleStyle.Render(primaryText)
 			if i == m.cursor {
-				marker = selectedMarkerStyle.Render("› ")
-				primary = selectedTitleStyle.Render(truncateToWidth(option.Primary, contentWidth-4))
+				marker = selectedMarkerStyle.Render("❯ ")
+				primary = selectedRowStyle.Render(selectedTitleStyle.Render(primaryText))
 			}
 			body.WriteString(marker + primary + "\n")
 			if option.Secondary != "" {
-				body.WriteString("  " + subtleStyle.Render(truncateToWidth(option.Secondary, contentWidth-4)) + "\n")
+				secondaryText := truncateToWidth(option.Secondary, contentWidth-6)
+				secondary := subtleStyle.Render(secondaryText)
+				if i == m.cursor {
+					secondary = selectedRowStyle.Render(subtleStyle.Render(secondaryText))
+				}
+				body.WriteString("  " + secondary + "\n")
 			}
-			body.WriteString("\n")
 		}
 	}
 
@@ -369,12 +375,17 @@ func (m *pickerModel) applyFilter() {
 	m.ensureCursorVisible()
 }
 
-func (m *pickerModel) visibleRows() int {
+func (m *pickerModel) visibleEntries() int {
 	if m.height <= 0 {
-		return 10
+		return 6
 	}
-	// Header + search box + blank lines + footer ~= 8 rows.
-	return max(4, m.height-8)
+	// Header + search box + spacing + footer ~= 7 rows.
+	usableLines := m.height - 7
+	if usableLines < 2 {
+		return 1
+	}
+	// Two lines per entry: title + metadata.
+	return max(1, usableLines/2)
 }
 
 func (m *pickerModel) ensureCursorVisible() {
@@ -382,14 +393,14 @@ func (m *pickerModel) ensureCursorVisible() {
 		m.offset = 0
 		return
 	}
-	rows := m.visibleRows()
+	entries := m.visibleEntries()
 	if m.cursor < m.offset {
 		m.offset = m.cursor
 	}
-	if m.cursor >= m.offset+rows {
-		m.offset = m.cursor - rows + 1
+	if m.cursor >= m.offset+entries {
+		m.offset = m.cursor - entries + 1
 	}
-	maxOffset := len(m.filtered) - rows
+	maxOffset := len(m.filtered) - entries
 	if maxOffset < 0 {
 		maxOffset = 0
 	}

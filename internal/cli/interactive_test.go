@@ -2,9 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/mithileshchellappan/resume/internal/session"
 )
@@ -90,5 +93,50 @@ func TestSessionMetaLineIncludesTimeBranchAndSize(t *testing.T) {
 	}
 	if !strings.Contains(got, "386KB") {
 		t.Fatalf("expected size in %q", got)
+	}
+}
+
+func TestPickerVisibleEntriesAndViewport(t *testing.T) {
+	opts := make([]pickerOption, 0, 20)
+	for i := 0; i < 20; i++ {
+		opts = append(opts, pickerOption{
+			Primary:   fmt.Sprintf("row-%02d", i),
+			Secondary: "meta",
+			Search:    fmt.Sprintf("row-%02d", i),
+		})
+	}
+	m := newPickerModel(pickerConfig{
+		Title:       "Resume Session",
+		Placeholder: "Search...",
+		Options:     opts,
+	})
+
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	pm := model.(pickerModel)
+	if got := pm.visibleEntries(); got != 6 {
+		t.Fatalf("visibleEntries mismatch: got %d want 6", got)
+	}
+
+	pm.cursor = 10
+	pm.ensureCursorVisible()
+	if pm.offset != 5 {
+		t.Fatalf("offset mismatch: got %d want 5", pm.offset)
+	}
+}
+
+func TestPickerViewShowsMarkerForSelectedItem(t *testing.T) {
+	m := newPickerModel(pickerConfig{
+		Title:       "Resume Session",
+		Placeholder: "Search...",
+		Options: []pickerOption{
+			{Primary: "first", Secondary: "meta", Search: "first"},
+			{Primary: "second", Secondary: "meta", Search: "second"},
+		},
+	})
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 16})
+	pm := model.(pickerModel)
+	view := pm.View()
+	if !strings.Contains(view, "❯") {
+		t.Fatalf("expected selection marker in view, got:\n%s", view)
 	}
 }
