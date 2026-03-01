@@ -1,0 +1,16 @@
+# Binaries
+bin/
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+
+# Build / temp
+.tmp/
+tmp/
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
