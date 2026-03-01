@@ -8,7 +8,6 @@ func TestParseUsageErrors(t *testing.T) {
 		args []string
 	}{
 		{name: "missing all", args: []string{}},
-		{name: "missing id", args: []string{"--from", "claude", "--to", "codex"}},
 		{name: "unsupported direction", args: []string{"--from", "claude", "--to", "claude", "--id", "x"}},
 		{name: "interactive missing from to", args: []string{"--interactive"}},
 	}
@@ -77,5 +76,16 @@ func TestParseValidAndHelpVersion(t *testing.T) {
 	}
 	if opts.SourceFolder != "/repo" {
 		t.Fatalf("unexpected source folder: %q", opts.SourceFolder)
+	}
+
+	opts, err = Parse([]string{"--from", "claude", "--to", "codex"})
+	if err != nil {
+		t.Fatalf("parse missing id should default to interactive: %v", err)
+	}
+	if !opts.Interactive {
+		t.Fatalf("expected interactive default when id is missing")
+	}
+	if opts.ID != "" {
+		t.Fatalf("expected empty id when id is omitted")
 	}
 }

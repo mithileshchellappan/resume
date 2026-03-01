@@ -86,11 +86,12 @@ func Parse(args []string) (Options, error) {
 	if opts.From == "" || opts.To == "" {
 		return Options{}, UsageError{Msg: "missing required flags: --from, --to"}
 	}
-	if opts.ID == "" && !opts.Interactive {
-		return Options{}, UsageError{Msg: "missing required flags: --id (or use --interactive)"}
-	}
 	if !isSupportedDirection(opts.From, opts.To) {
 		return Options{}, UsageError{Msg: "supported directions: --from claude --to codex OR --from codex --to claude"}
+	}
+	// Interactive selection is now the default path when --id is not provided.
+	if opts.ID == "" {
+		opts.Interactive = true
 	}
 
 	opts.ClaudeHome = expandHome(opts.ClaudeHome, home)

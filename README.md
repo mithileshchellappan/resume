@@ -20,7 +20,7 @@
 ```bash
 resume --from claude --to codex --id <claude_session_id>
 resume --from codex --to claude --id <codex_thread_id>
-resume --from codex --to claude --interactive
+resume --from codex --to claude
 ```
 
 ## Install
@@ -34,11 +34,14 @@ Optional flags:
 
 - `--claude-home` (default `~/.claude`)
 - `--codex-home` (default `~/.codex`)
-- `--interactive` (pick source session by folder/title instead of passing `--id`)
-- `--source-folder` (folder filter for interactive selection; defaults to current directory)
+- `--id` (optional; if omitted, interactive picker is used)
+- `--interactive` (optional compatibility flag to force picker)
+- `--source-folder` (folder filter for interactive picker; defaults to current directory)
 - `--cwd`
 - `--title`
 - `--dry-run`
+
+When using the interactive picker in a real terminal, use arrow keys (`↑`/`↓`) or `j`/`k`, then press `Enter` to choose.
 
 ## Exit Codes
 

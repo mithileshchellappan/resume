@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"strings"
 	"testing"
@@ -52,7 +53,10 @@ func TestSelectSessionInteractiveFolderThenSession(t *testing.T) {
 }
 
 func TestSelectSessionInteractiveRejectsInvalidInput(t *testing.T) {
-	sessions := []session.SourceSession{{ID: "a1", CWD: "/repo/a", Title: "Fix A", UpdatedAt: time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC)}}
+	sessions := []session.SourceSession{
+		{ID: "a1", CWD: "/repo/a", Title: "Fix A", UpdatedAt: time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)},
+		{ID: "a2", CWD: "/repo/a", Title: "Fix B", UpdatedAt: time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC)},
+	}
 
 	in := strings.NewReader("x\n1\n")
 	var out bytes.Buffer
@@ -65,5 +69,31 @@ func TestSelectSessionInteractiveRejectsInvalidInput(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Enter a number") {
 		t.Fatalf("expected validation prompt, got: %s", out.String())
+	}
+}
+
+func TestReadPickerKeyArrowSequences(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want pickerKey
+	}{
+		{name: "up arrow", in: "\x1b[A", want: pickerKeyUp},
+		{name: "down arrow", in: "\x1b[B", want: pickerKeyDown},
+		{name: "j down", in: "j", want: pickerKeyDown},
+		{name: "k up", in: "k", want: pickerKeyUp},
+		{name: "enter", in: "\n", want: pickerKeyEnter},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			key, err := readPickerKey(bufio.NewReader(strings.NewReader(tt.in)))
+			if err != nil {
+				t.Fatalf("readPickerKey error: %v", err)
+			}
+			if key != tt.want {
+				t.Fatalf("unexpected key: got %v want %v", key, tt.want)
+			}
+		})
 	}
 }
