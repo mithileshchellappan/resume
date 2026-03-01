@@ -92,6 +92,8 @@ func TestConvertNormalizesClaudeToolCallNamesAndArgs(t *testing.T) {
 			{Kind: session.EventToolResult, Result: &session.ToolResult{CallSourceID: "toolu_read", Output: "module example", Timestamp: ts.Add(4 * time.Second)}},
 			{Kind: session.EventToolCall, Call: &session.ToolCall{SourceID: "toolu_bash", Name: "Bash", Input: map[string]any{"command": "git status --short", "description": "show status"}, Timestamp: ts.Add(5 * time.Second), Index: 3}},
 			{Kind: session.EventToolResult, Result: &session.ToolResult{CallSourceID: "toolu_bash", Output: "", Timestamp: ts.Add(6 * time.Second)}},
+			{Kind: session.EventToolCall, Call: &session.ToolCall{SourceID: "toolu_agent", Name: "Agent", Input: map[string]any{"prompt": "find tests", "subagent_type": "Explore"}, Timestamp: ts.Add(7 * time.Second), Index: 4}},
+			{Kind: session.EventToolResult, Result: &session.ToolResult{CallSourceID: "toolu_agent", Output: `{"agent_id":"abc-123"}`, Timestamp: ts.Add(8 * time.Second)}},
 		},
 	}
 
@@ -100,6 +102,7 @@ func TestConvertNormalizesClaudeToolCallNamesAndArgs(t *testing.T) {
 			"call_111111111111111111111111",
 			"call_222222222222222222222222",
 			"call_333333333333333333333333",
+			"call_444444444444444444444444",
 		}},
 		Now: func() time.Time { return ts },
 	}
@@ -150,5 +153,45 @@ func TestConvertNormalizesClaudeToolCallNamesAndArgs(t *testing.T) {
 	}
 	if bashCall.Arguments["description"] != "show status" {
 		t.Fatalf("bash description missing: %#v", bashCall.Arguments)
+	}
+
+	agentCall, ok := calls["call_444444444444444444444444"]
+	if !ok {
+		t.Fatalf("missing agent call: %+v", out.Items)
+	}
+	if agentCall.Name != "spawn_agent" {
+		t.Fatalf("agent name mismatch: %q", agentCall.Name)
+	}
+	if agentCall.Arguments["message"] != "find tests" {
+		t.Fatalf("agent message mismatch: %#v", agentCall.Arguments)
+	}
+	if agentCall.Arguments["agent_type"] != "explorer" {
+		t.Fatalf("agent type mismatch: %#v", agentCall.Arguments)
+	}
+	if _, exists := agentCall.Arguments["subagent_type"]; exists {
+		t.Fatalf("unexpected subagent_type key: %#v", agentCall.Arguments)
+	}
+	if _, exists := agentCall.Arguments["prompt"]; exists {
+		t.Fatalf("unexpected prompt key: %#v", agentCall.Arguments)
+	}
+}
+
+func TestNormalizeClaudeSubagentType(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "Explore", want: "explorer"},
+		{in: "Plan", want: "planner"},
+		{in: "general-purpose", want: "default"},
+		{in: "default", want: "default"},
+		{in: "worker", want: "worker"},
+		{in: "", want: ""},
+	}
+	for _, tt := range tests {
+		got := normalizeClaudeSubagentType(tt.in)
+		if got != tt.want {
+			t.Fatalf("normalizeClaudeSubagentType(%q): got %q want %q", tt.in, got, tt.want)
+		}
 	}
 }

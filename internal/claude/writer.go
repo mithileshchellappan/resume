@@ -3,12 +3,14 @@ package claude
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,16 @@ import (
 var ErrWrite = errors.New("claude native write failed")
 
 const defaultClaudeVersion = "2.1.63"
+const claudeToolIDLength = 24
+
+// Keep a conservative content budget: Claude session rendering duplicates
+// portions of tool payloads, so this must sit well below nominal model context.
+const claudeContextBudgetChars = 250_000
+const claudeTruncatedKeepChars = 256
+const claudeToolInputSoftLimitChars = 1_024
+const claudeEventHardLimitChars = 2_048
+const claudeToolInputHardLimitChars = 1_024
+const claudeTruncationPrefix = "[truncated for target model context;"
 
 type Writer struct {
 	ClaudeHome string
@@ -73,6 +85,8 @@ func (w *Writer) Write(ctx context.Context, in session.SessionIR, meta session.C
 }
 
 func writeSessionJSONL(path, sessionID, cwd, gitBranch string, startedAt time.Time, events []session.Event) error {
+	events = normalizeEventsForClaudeContext(events, claudeContextBudgetChars)
+
 	tmp := path + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
@@ -95,6 +109,8 @@ func writeSessionJSONL(path, sessionID, cwd, gitBranch string, startedAt time.Ti
 	}
 
 	callIDMap := map[string]string{}
+	callInfoMap := map[string]toolCallInfo{}
+	droppedCalls := map[string]bool{} // source IDs of lifecycle tool calls to drop
 	prevUUID := ""
 	eventTS := startedAt
 	callCount := 0
@@ -166,15 +182,26 @@ func writeSessionJSONL(path, sessionID, cwd, gitBranch string, startedAt time.Ti
 			if ev.Call == nil {
 				continue
 			}
+			if isCodexLifecycleTool(ev.Call.Name) {
+				sourceID := strings.TrimSpace(ev.Call.SourceID)
+				if sourceID != "" {
+					droppedCalls[sourceID] = true
+				}
+				continue
+			}
 			sourceID := strings.TrimSpace(ev.Call.SourceID)
 			if sourceID == "" {
 				callCount++
 				sourceID = fmt.Sprintf("call_missing_%d", callCount)
 			}
-			claudeToolID := "toolu_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+			claudeToolID := newClaudeToolUseID()
 			callIDMap[sourceID] = claudeToolID
 
 			toolName, toolInput := normalizeCodexToolForClaude(ev.Call.Name, ev.Call.Input)
+			callInfoMap[sourceID] = toolCallInfo{
+				Name:  toolName,
+				Input: cloneMap(toolInput),
+			}
 			line := cloneMap(base)
 			line["type"] = "assistant"
 			line["message"] = map[string]any{
@@ -205,14 +232,19 @@ func writeSessionJSONL(path, sessionID, cwd, gitBranch string, startedAt time.Ti
 				continue
 			}
 			callSourceID := strings.TrimSpace(ev.Result.CallSourceID)
+			if droppedCalls[callSourceID] {
+				continue
+			}
 			toolUseID := callIDMap[callSourceID]
 			if toolUseID == "" {
-				toolUseID = "toolu_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+				toolUseID = newClaudeToolUseID()
 			}
-			output := strings.TrimSpace(ev.Result.Output)
+			output := normalizeToolResultOutput(ev.Result.Output)
 			if output == "" {
 				output = "[no output recorded]"
 			}
+			callInfo := callInfoMap[callSourceID]
+			toolUseResult := buildToolUseResult(callInfo.Name, callInfo.Input, output, ev.Result.Output)
 
 			line := cloneMap(base)
 			line["type"] = "user"
@@ -226,7 +258,7 @@ func writeSessionJSONL(path, sessionID, cwd, gitBranch string, startedAt time.Ti
 					},
 				},
 			}
-			line["toolUseResult"] = output
+			line["toolUseResult"] = toolUseResult
 			if err := writeLine(line); err != nil {
 				return err
 			}
@@ -274,6 +306,516 @@ func chooseTS(ev session.Event, fallback, startedAt time.Time) time.Time {
 	return startedAt.UTC()
 }
 
+func normalizeEventsForClaudeContext(events []session.Event, maxChars int) []session.Event {
+	if len(events) == 0 {
+		return events
+	}
+	if maxChars <= 0 {
+		maxChars = claudeContextBudgetChars
+	}
+
+	out := cloneEvents(events)
+	for i := range out {
+		out[i] = trimEventForContext(out[i], claudeEventHardLimitChars, claudeToolInputHardLimitChars)
+	}
+
+	total := estimateEventsChars(out)
+	if total <= maxChars {
+		return out
+	}
+
+	// Progressive passes preserve readability while forcing convergence under budget.
+	passPlan := []struct {
+		keepChars          int
+		toolInputSoftLimit int
+	}{
+		{keepChars: claudeTruncatedKeepChars, toolInputSoftLimit: claudeToolInputSoftLimitChars},
+		{keepChars: 96, toolInputSoftLimit: 256},
+		{keepChars: 64, toolInputSoftLimit: 64},
+	}
+	for _, pass := range passPlan {
+		for i := 0; i < len(out) && total > maxChars; i++ {
+			before := estimateEventChars(out[i])
+			out[i] = trimEventForContext(out[i], pass.keepChars, pass.toolInputSoftLimit)
+			after := estimateEventChars(out[i])
+			total -= before - after
+		}
+		if total <= maxChars {
+			break
+		}
+	}
+
+	return out
+}
+
+func estimateEventsChars(events []session.Event) int {
+	total := 0
+	for _, ev := range events {
+		total += estimateEventChars(ev)
+	}
+	return total
+}
+
+func estimateEventChars(ev session.Event) int {
+	switch ev.Kind {
+	case session.EventUserMessage, session.EventAssistantMessage:
+		if ev.Msg == nil {
+			return 0
+		}
+		return len(ev.Msg.Content)
+	case session.EventToolCall:
+		if ev.Call == nil {
+			return 0
+		}
+		size := len(ev.Call.Name)
+		if ev.Call.Input != nil {
+			if b, err := json.Marshal(ev.Call.Input); err == nil {
+				size += len(b)
+			}
+		}
+		return size
+	case session.EventToolResult:
+		if ev.Result == nil {
+			return 0
+		}
+		return len(ev.Result.Output)
+	default:
+		return 0
+	}
+}
+
+func trimEventForContext(ev session.Event, keepChars, toolInputSoftLimit int) session.Event {
+	switch ev.Kind {
+	case session.EventUserMessage, session.EventAssistantMessage:
+		if ev.Msg == nil {
+			return ev
+		}
+		ev.Msg.Content = truncateForContext(ev.Msg.Content, keepChars)
+	case session.EventToolCall:
+		if ev.Call == nil || ev.Call.Input == nil {
+			return ev
+		}
+		ev.Call.Input = truncateInputForContext(ev.Call.Input, toolInputSoftLimit)
+	case session.EventToolResult:
+		if ev.Result == nil {
+			return ev
+		}
+		ev.Result.Output = truncateForContext(ev.Result.Output, keepChars)
+	}
+	return ev
+}
+
+func truncateForContext(s string, keepChars int) string {
+	if keepChars <= 0 {
+		keepChars = claudeTruncatedKeepChars
+	}
+	base := s
+	if body, ok := unwrapTruncatedBody(s); ok {
+		base = body
+		if len(base) <= keepChars {
+			// Already truncated and body is within limit; keep existing envelope.
+			return s
+		}
+	}
+	if len(base) <= keepChars {
+		return base
+	}
+	head := base[:keepChars]
+	removed := len(base) - keepChars
+	return fmt.Sprintf("[truncated for target model context; original chars=%d, removed=%d]\n%s", len(base), removed, head)
+}
+
+func unwrapTruncatedBody(s string) (string, bool) {
+	if !strings.HasPrefix(s, claudeTruncationPrefix) {
+		return "", false
+	}
+	newline := strings.IndexByte(s, '\n')
+	if newline < 0 || newline+1 >= len(s) {
+		return "", false
+	}
+	return s[newline+1:], true
+}
+
+func truncateInputForContext(in map[string]any, limit int) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = truncateAnyForContext(v, limit)
+	}
+	return out
+}
+
+func truncateAnyForContext(v any, limit int) any {
+	switch x := v.(type) {
+	case string:
+		if limit > 0 && len(x) > limit {
+			return truncateForContext(x, limit)
+		}
+		return x
+	case []any:
+		out := make([]any, len(x))
+		for i := range x {
+			out[i] = truncateAnyForContext(x[i], limit)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, vv := range x {
+			out[k] = truncateAnyForContext(vv, limit)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func cloneEvents(events []session.Event) []session.Event {
+	out := make([]session.Event, 0, len(events))
+	for _, ev := range events {
+		clone := ev
+		switch ev.Kind {
+		case session.EventUserMessage, session.EventAssistantMessage:
+			if ev.Msg != nil {
+				m := *ev.Msg
+				clone.Msg = &m
+			}
+		case session.EventToolCall:
+			if ev.Call != nil {
+				c := *ev.Call
+				c.Input = cloneMap(ev.Call.Input)
+				clone.Call = &c
+			}
+		case session.EventToolResult:
+			if ev.Result != nil {
+				r := *ev.Result
+				clone.Result = &r
+			}
+		}
+		out = append(out, clone)
+	}
+	return out
+}
+
+type toolCallInfo struct {
+	Name  string
+	Input map[string]any
+}
+
+func buildToolUseResult(toolName string, toolInput map[string]any, output, rawOutput string) any {
+	switch strings.TrimSpace(toolName) {
+	case "Edit", "Write", "MultiEdit":
+		return buildFileToolUseResult(toolInput)
+	case "Bash":
+		return buildBashToolUseResult(output, rawOutput)
+	case "Agent":
+		return buildAgentToolUseResult(toolInput, output, rawOutput)
+	case "AskUserQuestion":
+		return buildAskUserQuestionToolUseResult(toolInput, output, rawOutput)
+	default:
+		return output
+	}
+}
+
+func buildFileToolUseResult(toolInput map[string]any) map[string]any {
+	if toolInput == nil {
+		toolInput = map[string]any{}
+	}
+
+	filePath := firstNonEmptyString(toolInput["file_path"], toolInput["filePath"], toolInput["path"])
+	oldString := firstNonEmptyString(toolInput["old_string"], toolInput["oldString"])
+	newString := firstNonEmptyString(toolInput["new_string"], toolInput["newString"], toolInput["content"])
+	// Keep migrated output deterministic and bounded: never hydrate from local disk.
+	originalFile := firstNonEmptyString(toolInput["original_file"], toolInput["originalFile"], oldString)
+
+	replaceAll := false
+	if b, ok := asBoolValue(toolInput["replace_all"]); ok {
+		replaceAll = b
+	} else if b, ok := asBoolValue(toolInput["replaceAll"]); ok {
+		replaceAll = b
+	}
+
+	userModified := false
+	if b, ok := asBoolValue(toolInput["user_modified"]); ok {
+		userModified = b
+	} else if b, ok := asBoolValue(toolInput["userModified"]); ok {
+		userModified = b
+	}
+
+	structuredPatch := []map[string]any{}
+	if oldString != "" || newString != "" {
+		structuredPatch = append(structuredPatch, map[string]any{
+			"oldStart": 1,
+			"oldLines": countLines(oldString),
+			"newStart": 1,
+			"newLines": countLines(newString),
+			"lines":    buildPatchLines(oldString, newString),
+		})
+	}
+
+	return map[string]any{
+		"filePath":        filePath,
+		"oldString":       oldString,
+		"newString":       newString,
+		"originalFile":    originalFile,
+		"structuredPatch": structuredPatch,
+		"userModified":    userModified,
+		"replaceAll":      replaceAll,
+	}
+}
+
+func buildPatchLines(oldString, newString string) []string {
+	lines := make([]string, 0, countLines(oldString)+countLines(newString))
+	if oldString != "" {
+		for _, line := range strings.Split(oldString, "\n") {
+			lines = append(lines, "-"+line)
+		}
+	}
+	if newString != "" {
+		for _, line := range strings.Split(newString, "\n") {
+			lines = append(lines, "+"+line)
+		}
+	}
+	return lines
+}
+
+func countLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+func buildBashToolUseResult(output, rawOutput string) map[string]any {
+	stdout := output
+	stderr := ""
+	interrupted := false
+	isImage := false
+	noOutputExpected := false
+
+	if payload, ok := parseJSONMap(rawOutput); ok {
+		if s, ok := payload["stdout"]; ok {
+			stdout = asStringValue(s)
+		}
+		if s, ok := payload["stderr"]; ok {
+			stderr = asStringValue(s)
+		}
+		if b, ok := asBoolValue(payload["interrupted"]); ok {
+			interrupted = b
+		}
+		if b, ok := asBoolValue(payload["isImage"]); ok {
+			isImage = b
+		}
+		if b, ok := asBoolValue(payload["noOutputExpected"]); ok {
+			noOutputExpected = b
+		}
+	}
+
+	return map[string]any{
+		"stdout":           stdout,
+		"stderr":           stderr,
+		"interrupted":      interrupted,
+		"isImage":          isImage,
+		"noOutputExpected": noOutputExpected,
+	}
+}
+
+func buildAgentToolUseResult(toolInput map[string]any, output, rawOutput string) map[string]any {
+	if toolInput == nil {
+		toolInput = map[string]any{}
+	}
+
+	payload := map[string]any{}
+	if p, ok := parseJSONMap(rawOutput); ok {
+		payload = p
+	} else if p, ok := parseJSONMap(output); ok {
+		payload = p
+	}
+
+	agentID := firstNonEmptyString(payload["agent_id"], payload["agentId"], payload["id"])
+	status := strings.TrimSpace(asStringValue(payload["status"]))
+	if status == "" {
+		if agentID != "" {
+			status = "completed"
+		} else {
+			status = "unknown"
+		}
+	}
+
+	content := output
+	if s := strings.TrimSpace(asStringValue(payload["content"])); s != "" {
+		content = s
+	}
+
+	usage := map[string]any{}
+	if u, ok := payload["usage"].(map[string]any); ok {
+		usage = u
+	}
+
+	totalDurationMs, _ := asIntValue(payload["totalDurationMs"])
+	totalTokens, _ := asIntValue(payload["totalTokens"])
+	totalToolUseCount, _ := asIntValue(payload["totalToolUseCount"])
+
+	return map[string]any{
+		"agentId":           agentID,
+		"status":            status,
+		"prompt":            firstNonEmptyString(toolInput["prompt"], toolInput["message"]),
+		"content":           content,
+		"totalDurationMs":   totalDurationMs,
+		"totalTokens":       totalTokens,
+		"totalToolUseCount": totalToolUseCount,
+		"usage":             usage,
+	}
+}
+
+func buildAskUserQuestionToolUseResult(toolInput map[string]any, output, rawOutput string) any {
+	payload := map[string]any{}
+	if p, ok := parseJSONMap(rawOutput); ok {
+		payload = p
+	} else if p, ok := parseJSONMap(output); ok {
+		payload = p
+	} else {
+		return output
+	}
+
+	rawAnswers, ok := payload["answers"].(map[string]any)
+	if !ok || rawAnswers == nil {
+		return output
+	}
+
+	questions := []any{}
+	questionByID := map[string]string{}
+	if toolInput != nil {
+		if list, ok := toolInput["questions"].([]any); ok {
+			questions = list
+			for _, item := range list {
+				question, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				questionID := strings.TrimSpace(asStringValue(question["id"]))
+				questionText := strings.TrimSpace(asStringValue(question["question"]))
+				if questionID != "" && questionText != "" {
+					questionByID[questionID] = questionText
+				}
+			}
+		}
+	}
+
+	answers := map[string]any{}
+	for key, value := range rawAnswers {
+		answerText := strings.TrimSpace(extractAskUserAnswerText(value))
+		if answerText == "" {
+			continue
+		}
+		questionKey := strings.TrimSpace(key)
+		if mapped := strings.TrimSpace(questionByID[questionKey]); mapped != "" {
+			questionKey = mapped
+		}
+		if questionKey == "" {
+			continue
+		}
+		answers[questionKey] = answerText
+	}
+	if len(answers) == 0 {
+		return output
+	}
+
+	result := map[string]any{
+		"questions": questions,
+		"answers":   answers,
+	}
+	if annotations, ok := payload["annotations"].(map[string]any); ok && len(annotations) > 0 {
+		result["annotations"] = annotations
+	}
+	return result
+}
+
+func extractAskUserAnswerText(v any) string {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case []any:
+		parts := make([]string, 0, len(x))
+		for _, item := range x {
+			if s := strings.TrimSpace(extractAskUserAnswerText(item)); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, ", ")
+	case map[string]any:
+		if answers, ok := x["answers"]; ok {
+			return extractAskUserAnswerText(answers)
+		}
+		if answer, ok := x["answer"]; ok {
+			return extractAskUserAnswerText(answer)
+		}
+	}
+	return strings.TrimSpace(asStringValue(v))
+}
+
+func parseJSONMap(raw string) (map[string]any, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil || payload == nil {
+		return nil, false
+	}
+	return payload, true
+}
+
+func asBoolValue(v any) (bool, bool) {
+	switch x := v.(type) {
+	case bool:
+		return x, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+func asIntValue(v any) (int, bool) {
+	switch x := v.(type) {
+	case int:
+		return x, true
+	case int8:
+		return int(x), true
+	case int16:
+		return int(x), true
+	case int32:
+		return int(x), true
+	case int64:
+		return int(x), true
+	case uint:
+		return int(x), true
+	case uint8:
+		return int(x), true
+	case uint16:
+		return int(x), true
+	case uint32:
+		return int(x), true
+	case uint64:
+		return int(x), true
+	case float32:
+		return int(x), true
+	case float64:
+		return int(x), true
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(x))
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	default:
+		return 0, false
+	}
+}
+
 func normalizeCodexToolForClaude(name string, input map[string]any) (string, map[string]any) {
 	name = strings.TrimSpace(name)
 	if input == nil {
@@ -304,13 +846,62 @@ func normalizeCodexToolForClaude(name string, input map[string]any) (string, map
 			"new_string": patch,
 		}
 
+	case "edit":
+		out := cloneMap(input)
+		filePath := firstNonEmptyString(
+			out["file_path"],
+			out["filePath"],
+			out["path"],
+		)
+		out["file_path"] = filePath
+		delete(out, "filePath")
+		return "Edit", out
+
+	case "multiedit":
+		out := cloneMap(input)
+		filePath := firstNonEmptyString(
+			out["file_path"],
+			out["filePath"],
+			out["path"],
+		)
+		out["file_path"] = filePath
+		delete(out, "filePath")
+		return "MultiEdit", out
+
 	case "view_image":
 		path := strings.TrimSpace(asStringValue(input["path"]))
 		return "Read", map[string]any{"file_path": path}
 
+	case "read":
+		out := cloneMap(input)
+		filePath := firstNonEmptyString(
+			out["file_path"],
+			out["filePath"],
+			out["path"],
+		)
+		clean := map[string]any{"file_path": filePath}
+		if v, ok := out["offset"]; ok {
+			clean["offset"] = v
+		}
+		if v, ok := out["limit"]; ok {
+			clean["limit"] = v
+		}
+		return "Read", clean
+
+	case "write":
+		out := cloneMap(input)
+		filePath := firstNonEmptyString(
+			out["file_path"],
+			out["filePath"],
+			out["path"],
+		)
+		out["file_path"] = filePath
+		delete(out, "filePath")
+		return "Write", out
+
 	case "spawn_agent":
 		prompt := strings.TrimSpace(asStringValue(input["message"]))
-		agentType := strings.TrimSpace(asStringValue(input["agent_type"]))
+		agentType := normalizeCodexAgentType(strings.TrimSpace(asStringValue(input["agent_type"])))
 		desc := prompt
 		if len(desc) > 50 {
 			desc = desc[:50]
@@ -329,6 +920,31 @@ func normalizeCodexToolForClaude(name string, input map[string]any) (string, map
 
 	default:
 		return name, input
+	}
+}
+
+// normalizeCodexAgentType maps Codex agent_type values to Claude subagent_type values.
+func normalizeCodexAgentType(agentType string) string {
+	switch strings.ToLower(agentType) {
+	case "explorer":
+		return "Explore"
+	case "planner":
+		return "Plan"
+	case "default", "":
+		return "general-purpose"
+	default:
+		return agentType
+	}
+}
+
+// isCodexLifecycleTool returns true for Codex-only agent lifecycle tools
+// that have no Claude equivalent and should be filtered during conversion.
+func isCodexLifecycleTool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "wait", "close_agent":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -351,6 +967,68 @@ func asStringValue(v any) string {
 	default:
 		return ""
 	}
+}
+
+func normalizeToolResultOutput(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	tryParse := func(s string) (map[string]any, bool) {
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(s), &payload); err != nil || payload == nil {
+			return nil, false
+		}
+		return payload, true
+	}
+
+	// Codex custom tool outputs commonly wrap textual stdout in {"output":"...","metadata":{...}}.
+	// Unwrap that shape so Claude renders native tool results as plain text.
+	if payload, ok := tryParse(raw); ok {
+		if _, hasMetadata := payload["metadata"]; hasMetadata {
+			if out := strings.TrimSpace(asStringValue(payload["output"])); out != "" {
+				return out
+			}
+		}
+		return raw
+	}
+
+	// Some captured outputs decode into strings containing literal newlines/tabs,
+	// which makes the wrapper JSON invalid for strict parsing. Re-escape controls
+	// and retry extraction.
+	sanitized := strings.NewReplacer("\r", "\\r", "\n", "\\n", "\t", "\\t").Replace(raw)
+	if payload, ok := tryParse(sanitized); ok {
+		if _, hasMetadata := payload["metadata"]; hasMetadata {
+			if out := strings.TrimSpace(asStringValue(payload["output"])); out != "" {
+				return out
+			}
+		}
+	}
+	return raw
+}
+
+func firstNonEmptyString(vals ...any) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(asStringValue(v)); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func newClaudeToolUseID() string {
+	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	buf := make([]byte, claudeToolIDLength)
+	if _, err := rand.Read(buf); err != nil {
+		// Keep conversion robust even if random source fails.
+		return "toolu_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	}
+	out := make([]byte, claudeToolIDLength)
+	for i := range buf {
+		out[i] = alphabet[int(buf[i])%len(alphabet)]
+	}
+	return "toolu_" + string(out)
 }
 
 type sessionsIndexEntry struct {
