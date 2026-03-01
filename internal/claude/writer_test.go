@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +61,7 @@ func TestWriterWritesSessionAndIndex(t *testing.T) {
 	var sawToolUse bool
 	var sawToolResult bool
 	var toolUseID string
+	var bashToolUseResult map[string]any
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		var line map[string]any
@@ -91,6 +93,11 @@ func TestWriterWritesSessionAndIndex(t *testing.T) {
 			if got, _ := first["tool_use_id"].(string); got == "" || got != toolUseID {
 				t.Fatalf("tool_result id mismatch: got %q want %q", got, toolUseID)
 			}
+			var ok bool
+			bashToolUseResult, ok = line["toolUseResult"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected Bash toolUseResult object, got %T", line["toolUseResult"])
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -98,6 +105,269 @@ func TestWriterWritesSessionAndIndex(t *testing.T) {
 	}
 	if !sawToolUse || !sawToolResult {
 		t.Fatalf("missing tool records: use=%v result=%v", sawToolUse, sawToolResult)
+	}
+	if ok, err := regexp.MatchString(`^toolu_[0-9A-Za-z]{24}$`, toolUseID); err != nil || !ok {
+		t.Fatalf("tool_use id format mismatch: %q", toolUseID)
+	}
+	if got, _ := bashToolUseResult["stdout"].(string); got != "M foo.go" {
+		t.Fatalf("bash stdout mismatch: got %q want %q", got, "M foo.go")
+	}
+	if got, _ := bashToolUseResult["stderr"].(string); got != "" {
+		t.Fatalf("bash stderr mismatch: got %q want empty", got)
+	}
+	if got, ok := bashToolUseResult["interrupted"].(bool); !ok || got {
+		t.Fatalf("bash interrupted mismatch: got %#v", bashToolUseResult["interrupted"])
+	}
+	if got, ok := bashToolUseResult["isImage"].(bool); !ok || got {
+		t.Fatalf("bash isImage mismatch: got %#v", bashToolUseResult["isImage"])
+	}
+	if got, ok := bashToolUseResult["noOutputExpected"].(bool); !ok || got {
+		t.Fatalf("bash noOutputExpected mismatch: got %#v", bashToolUseResult["noOutputExpected"])
+	}
+}
+
+func TestWriterUnwrapsJSONWrappedToolResultOutput(t *testing.T) {
+	home := t.TempDir()
+	w := NewWriter(home)
+	now := time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC)
+	w.Now = func() time.Time { return now }
+
+	ir := session.SessionIR{
+		SourceID:  "codex-thread-json-output",
+		CWD:       "/Users/mithilesh/Code/clis/resume",
+		StartedAt: now,
+		OrderedEvents: []session.Event{
+			{Kind: session.EventUserMessage, Msg: &session.Message{Role: "user", Content: "apply patch", Timestamp: now}},
+			{Kind: session.EventToolCall, Call: &session.ToolCall{
+				SourceID:  "call_edit_1",
+				Name:      "Edit",
+				Input:     map[string]any{"file_path": "src/main.go", "old_string": "old", "new_string": "new"},
+				Timestamp: now.Add(time.Second),
+			}},
+			{Kind: session.EventToolResult, Result: &session.ToolResult{
+				CallSourceID: "call_edit_1",
+				Output: `{"output":"Success. Updated the following files:
+M src/main.go
+","metadata":{"exit_code":0}}`,
+				Timestamp: now.Add(2 * time.Second),
+			}},
+		},
+	}
+
+	_, sessionPath, err := w.Write(context.Background(), ir, session.ClaudeSessionMeta{CWD: ir.CWD})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f, err := os.Open(sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var toolResultContent string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var line map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			t.Fatalf("bad json line: %v", err)
+		}
+		msg, _ := line["message"].(map[string]any)
+		if msg == nil {
+			continue
+		}
+		content, _ := msg["content"].([]any)
+		if len(content) == 0 {
+			continue
+		}
+		first, _ := content[0].(map[string]any)
+		if first == nil {
+			continue
+		}
+		if kind, _ := first["type"].(string); kind == "tool_result" {
+			toolResultContent, _ = first["content"].(string)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.HasPrefix(strings.TrimSpace(toolResultContent), "{") {
+		t.Fatalf("tool_result should be unwrapped plain text, got: %q", toolResultContent)
+	}
+	if !strings.Contains(toolResultContent, "Success. Updated the following files") {
+		t.Fatalf("expected unwrapped success message, got: %q", toolResultContent)
+	}
+}
+
+func TestWriterBuildsStructuredEditToolUseResult(t *testing.T) {
+	home := t.TempDir()
+	w := NewWriter(home)
+	now := time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC)
+	w.Now = func() time.Time { return now }
+
+	ir := session.SessionIR{
+		SourceID:  "codex-thread-edit-result-shape",
+		CWD:       "/Users/mithilesh/Code/clis/resume",
+		StartedAt: now,
+		OrderedEvents: []session.Event{
+			{Kind: session.EventToolCall, Call: &session.ToolCall{
+				SourceID:  "call_edit_1",
+				Name:      "Edit",
+				Input:     map[string]any{"file_path": "src/main.go", "old_string": "old", "new_string": "new", "replace_all": false},
+				Timestamp: now.Add(time.Second),
+			}},
+			{Kind: session.EventToolResult, Result: &session.ToolResult{
+				CallSourceID: "call_edit_1",
+				Output:       "The file src/main.go has been updated successfully.",
+				Timestamp:    now.Add(2 * time.Second),
+			}},
+		},
+	}
+
+	_, sessionPath, err := w.Write(context.Background(), ir, session.ClaudeSessionMeta{CWD: ir.CWD})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f, err := os.Open(sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var editToolUseResult map[string]any
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var line map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			t.Fatalf("bad json line: %v", err)
+		}
+		msg, _ := line["message"].(map[string]any)
+		if msg == nil {
+			continue
+		}
+		content, _ := msg["content"].([]any)
+		if len(content) == 0 {
+			continue
+		}
+		first, _ := content[0].(map[string]any)
+		if first == nil {
+			continue
+		}
+		if kind, _ := first["type"].(string); kind == "tool_result" {
+			var ok bool
+			editToolUseResult, ok = line["toolUseResult"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected Edit toolUseResult object, got %T", line["toolUseResult"])
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, _ := editToolUseResult["filePath"].(string); got != "src/main.go" {
+		t.Fatalf("filePath mismatch: got %q want %q", got, "src/main.go")
+	}
+	if got, _ := editToolUseResult["oldString"].(string); got != "old" {
+		t.Fatalf("oldString mismatch: got %q want %q", got, "old")
+	}
+	if got, _ := editToolUseResult["newString"].(string); got != "new" {
+		t.Fatalf("newString mismatch: got %q want %q", got, "new")
+	}
+	if _, ok := editToolUseResult["originalFile"].(string); !ok {
+		t.Fatalf("originalFile should be string: %#v", editToolUseResult["originalFile"])
+	}
+	if _, ok := editToolUseResult["structuredPatch"].([]any); !ok {
+		t.Fatalf("structuredPatch should be []any: %#v", editToolUseResult["structuredPatch"])
+	}
+	if got, ok := editToolUseResult["replaceAll"].(bool); !ok || got {
+		t.Fatalf("replaceAll mismatch: got %#v", editToolUseResult["replaceAll"])
+	}
+	if got, ok := editToolUseResult["userModified"].(bool); !ok || got {
+		t.Fatalf("userModified mismatch: got %#v", editToolUseResult["userModified"])
+	}
+}
+
+func TestWriterBuildsStructuredAgentToolUseResult(t *testing.T) {
+	home := t.TempDir()
+	w := NewWriter(home)
+	now := time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC)
+	w.Now = func() time.Time { return now }
+
+	ir := session.SessionIR{
+		SourceID:  "codex-thread-agent-result-shape",
+		CWD:       "/Users/mithilesh/Code/clis/resume",
+		StartedAt: now,
+		OrderedEvents: []session.Event{
+			{Kind: session.EventToolCall, Call: &session.ToolCall{
+				SourceID:  "call_agent_1",
+				Name:      "spawn_agent",
+				Input:     map[string]any{"agent_type": "explorer", "message": "find tests"},
+				Timestamp: now.Add(time.Second),
+			}},
+			{Kind: session.EventToolResult, Result: &session.ToolResult{
+				CallSourceID: "call_agent_1",
+				Output:       `{"agent_id":"abc-123","status":"completed"}`,
+				Timestamp:    now.Add(2 * time.Second),
+			}},
+		},
+	}
+
+	_, sessionPath, err := w.Write(context.Background(), ir, session.ClaudeSessionMeta{CWD: ir.CWD})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f, err := os.Open(sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var agentToolUseResult map[string]any
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var line map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			t.Fatalf("bad json line: %v", err)
+		}
+		msg, _ := line["message"].(map[string]any)
+		if msg == nil {
+			continue
+		}
+		content, _ := msg["content"].([]any)
+		if len(content) == 0 {
+			continue
+		}
+		first, _ := content[0].(map[string]any)
+		if first == nil {
+			continue
+		}
+		if kind, _ := first["type"].(string); kind == "tool_result" {
+			var ok bool
+			agentToolUseResult, ok = line["toolUseResult"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected Agent toolUseResult object, got %T", line["toolUseResult"])
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, _ := agentToolUseResult["agentId"].(string); got != "abc-123" {
+		t.Fatalf("agentId mismatch: got %q want %q", got, "abc-123")
+	}
+	if got, _ := agentToolUseResult["status"].(string); got != "completed" {
+		t.Fatalf("status mismatch: got %q want %q", got, "completed")
+	}
+	if got, _ := agentToolUseResult["prompt"].(string); got != "find tests" {
+		t.Fatalf("prompt mismatch: got %q want %q", got, "find tests")
+	}
+	if got, ok := agentToolUseResult["usage"].(map[string]any); !ok || got == nil {
+		t.Fatalf("usage mismatch: %#v", agentToolUseResult["usage"])
 	}
 }
 
@@ -209,6 +479,35 @@ func TestWriterNormalizesCodexToolNames(t *testing.T) {
 			toolName: "request_user_input",
 			input:    map[string]any{"message": "which option?"},
 			wantName: "AskUserQuestion",
+		},
+		{
+			name:     "Edit normalizes filePath alias",
+			toolName: "Edit",
+			input:    map[string]any{"filePath": "src/main.go", "old_string": "old", "new_string": "new"},
+			wantName: "Edit",
+			wantCheck: func(t *testing.T, input map[string]any) {
+				if input["file_path"] != "src/main.go" {
+					t.Fatalf("file_path: got %v want src/main.go", input["file_path"])
+				}
+				if _, ok := input["filePath"]; ok {
+					t.Fatalf("filePath alias should be removed: %+v", input)
+				}
+			},
+		},
+		{
+			name:     "Edit defaults empty file_path when missing",
+			toolName: "Edit",
+			input:    map[string]any{"new_string": "content"},
+			wantName: "Edit",
+			wantCheck: func(t *testing.T, input map[string]any) {
+				v, ok := input["file_path"].(string)
+				if !ok {
+					t.Fatalf("file_path missing or non-string: %+v", input)
+				}
+				if v != "" {
+					t.Fatalf("file_path: got %q want empty string", v)
+				}
+			},
 		},
 		{
 			name:     "update_plan to TodoWrite",
