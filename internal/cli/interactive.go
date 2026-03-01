@@ -202,9 +202,9 @@ func runTerminalPicker(in io.Reader, out io.Writer, title string, options []stri
 	}
 	defer restore()
 
-	_, _ = fmt.Fprint(outFile, "\x1b[?25l")
+	_, _ = fmt.Fprint(outFile, "\x1b[?1049h\x1b[?25l")
 	defer func() {
-		_, _ = fmt.Fprint(outFile, "\x1b[?25h\x1b[0m\n")
+		_, _ = fmt.Fprint(outFile, "\x1b[?25h\x1b[0m\x1b[?1049l")
 	}()
 
 	reader := bufio.NewReader(inFile)
@@ -234,6 +234,15 @@ func runTerminalPicker(in io.Reader, out io.Writer, title string, options []stri
 
 func renderPickerFrame(out *os.File, title string, options []string, selected int) {
 	const maxVisible = 14
+	width := terminalWidth(out)
+	if width <= 0 {
+		width = 100
+	}
+	contentWidth := width - 4
+	if contentWidth < 20 {
+		contentWidth = 20
+	}
+
 	start := 0
 	if len(options) > maxVisible {
 		start = selected - (maxVisible / 2)
@@ -250,21 +259,21 @@ func renderPickerFrame(out *os.File, title string, options []string, selected in
 		end = start + maxVisible
 	}
 
-	_, _ = fmt.Fprint(out, "\x1b[2J\x1b[H")
-	_, _ = fmt.Fprintf(out, "%s\n", title)
-	_, _ = fmt.Fprintln(out, "Use ↑/↓ (or j/k), Enter to select.")
+	_, _ = fmt.Fprint(out, "\x1b[H\x1b[2J")
+	_, _ = fmt.Fprintf(out, "%s\n", truncateToWidth(title, contentWidth))
+	_, _ = fmt.Fprintln(out, truncateToWidth("Use ↑/↓ (or j/k), Enter to select.", contentWidth))
 	if start > 0 {
-		_, _ = fmt.Fprintf(out, "  ... %d above\n", start)
+		_, _ = fmt.Fprintf(out, "  %s\n", truncateToWidth(fmt.Sprintf("... %d above", start), contentWidth))
 	}
 	for i := start; i < end; i++ {
 		prefix := "  "
 		if i == selected {
 			prefix = "> "
 		}
-		_, _ = fmt.Fprintf(out, "%s%s\n", prefix, options[i])
+		_, _ = fmt.Fprintf(out, "%s%s\n", prefix, truncateToWidth(options[i], contentWidth))
 	}
 	if end < len(options) {
-		_, _ = fmt.Fprintf(out, "  ... %d more\n", len(options)-end)
+		_, _ = fmt.Fprintf(out, "  %s\n", truncateToWidth(fmt.Sprintf("... %d more", len(options)-end), contentWidth))
 	}
 }
 
@@ -337,4 +346,15 @@ func normalizeDisplayWhitespace(s string) string {
 		return ""
 	}
 	return strings.Join(strings.Fields(s), " ")
+}
+
+func truncateToWidth(s string, max int) string {
+	s = normalizeDisplayWhitespace(s)
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
 }

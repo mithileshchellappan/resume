@@ -35,3 +35,11 @@ func setInputRawMode(f *os.File) (func(), error) {
 		_ = unix.IoctlSetTermios(fd, unix.TCSETS, &state)
 	}, nil
 }
+
+func terminalWidth(f *os.File) int {
+	ws, err := unix.IoctlGetWinsize(int(f.Fd()), unix.TIOCGWINSZ)
+	if err != nil || ws == nil || ws.Col == 0 {
+		return 0
+	}
+	return int(ws.Col)
+}
