@@ -33,6 +33,7 @@ func TestWriterWritesRolloutDBAndIndex(t *testing.T) {
 			{Kind: session.CodexItemUserMessage, Role: "user", Text: "hello", Timestamp: now},
 			{Kind: session.CodexItemFunctionCall, CallID: "call_abc", Name: "shell", Arguments: map[string]any{"command": []any{"bash", "-lc", "pwd"}}, Timestamp: now},
 			{Kind: session.CodexItemFunctionOut, CallID: "call_abc", Output: "ok", Timestamp: now},
+			{Kind: session.CodexItemAssistantText, Role: "assistant", Text: "done", Timestamp: now},
 		},
 	}
 
@@ -70,6 +71,44 @@ func TestWriterWritesRolloutDBAndIndex(t *testing.T) {
 	joined := strings.Join(lineTypes, ",")
 	if !strings.Contains(joined, "session_meta") || !strings.Contains(joined, "response_item") || !strings.Contains(joined, "turn_context") || !strings.Contains(joined, "event_msg") {
 		t.Fatalf("unexpected rollout line types: %v", lineTypes)
+	}
+
+	// Validate assistant messages are emitted with Codex-compatible final phase markers.
+	if _, err := f.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	scanner = bufio.NewScanner(f)
+	var sawAssistantResponse bool
+	var sawAssistantEvent bool
+	for scanner.Scan() {
+		var m map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &m); err != nil {
+			t.Fatalf("bad json line: %v", err)
+		}
+		typ, _ := m["type"].(string)
+		payload, _ := m["payload"].(map[string]any)
+		if typ == "response_item" && payload != nil {
+			if role, _ := payload["role"].(string); role == "assistant" {
+				if phase, _ := payload["phase"].(string); phase != "final_answer" {
+					t.Fatalf("assistant response phase mismatch: %q", phase)
+				}
+				sawAssistantResponse = true
+			}
+		}
+		if typ == "event_msg" && payload != nil {
+			if pType, _ := payload["type"].(string); pType == "agent_message" {
+				if phase, _ := payload["phase"].(string); phase != "final_answer" {
+					t.Fatalf("assistant event phase mismatch: %q", phase)
+				}
+				sawAssistantEvent = true
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !sawAssistantResponse || !sawAssistantEvent {
+		t.Fatalf("missing assistant artifacts: response=%v event=%v", sawAssistantResponse, sawAssistantEvent)
 	}
 
 	db, err := sql.Open("sqlite", stateDB)

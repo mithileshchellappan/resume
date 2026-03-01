@@ -257,6 +257,7 @@ func payloadFromItem(item session.CodexItem) map[string]any {
 				"type": "output_text",
 				"text": item.Text,
 			}},
+			"phase": "final_answer",
 		}
 	case session.CodexItemFunctionCall:
 		argJSON, _ := json.Marshal(item.Arguments)
@@ -281,15 +282,17 @@ func eventMsgPayloadFromItem(item session.CodexItem) (map[string]any, bool) {
 	switch item.Kind {
 	case session.CodexItemUserMessage:
 		return map[string]any{
-			"type":    "user_message",
-			"message": item.Text,
-			"images":  []any{},
+			"type":          "user_message",
+			"message":       item.Text,
+			"images":        []any{},
+			"local_images":  []any{},
+			"text_elements": []any{},
 		}, true
 	case session.CodexItemAssistantText:
 		return map[string]any{
 			"type":    "agent_message",
 			"message": item.Text,
-			"phase":   "final",
+			"phase":   "final_answer",
 		}, true
 	default:
 		return nil, false
