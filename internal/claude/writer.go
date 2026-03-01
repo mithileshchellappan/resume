@@ -292,9 +292,56 @@ func normalizeCodexToolForClaude(name string, input map[string]any) (string, map
 			out["description"] = desc
 		}
 		return "Bash", out
+
+	case "apply_patch":
+		patch := strings.TrimSpace(asStringValue(input["content"]))
+		if patch == "" {
+			patch = strings.TrimSpace(asStringValue(input["raw"]))
+		}
+		filePath := extractPatchFilePath(patch)
+		return "Edit", map[string]any{
+			"file_path":  filePath,
+			"new_string": patch,
+		}
+
+	case "view_image":
+		path := strings.TrimSpace(asStringValue(input["path"]))
+		return "Read", map[string]any{"file_path": path}
+
+	case "spawn_agent":
+		prompt := strings.TrimSpace(asStringValue(input["message"]))
+		agentType := strings.TrimSpace(asStringValue(input["agent_type"]))
+		desc := prompt
+		if len(desc) > 50 {
+			desc = desc[:50]
+		}
+		return "Agent", map[string]any{
+			"prompt":        prompt,
+			"subagent_type": agentType,
+			"description":   desc,
+		}
+
+	case "request_user_input":
+		return "AskUserQuestion", input
+
+	case "update_plan":
+		return "TodoWrite", input
+
 	default:
 		return name, input
 	}
+}
+
+func extractPatchFilePath(patch string) string {
+	for _, line := range strings.Split(patch, "\n") {
+		line = strings.TrimSpace(line)
+		for _, prefix := range []string{"*** Update File: ", "*** Add File: ", "*** Delete File: "} {
+			if strings.HasPrefix(line, prefix) {
+				return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+			}
+		}
+	}
+	return ""
 }
 
 func asStringValue(v any) string {

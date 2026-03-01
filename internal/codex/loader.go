@@ -105,6 +105,7 @@ type responseItemPayload struct {
 	Content   json.RawMessage `json:"content"`
 	Name      string          `json:"name"`
 	Arguments any             `json:"arguments"`
+	Input     any             `json:"input"`
 	CallID    string          `json:"call_id"`
 	Output    any             `json:"output"`
 }
@@ -184,10 +185,16 @@ func (l *Loader) loadRollout(ctx context.Context, threadID, rolloutPath, fallbac
 			switch p.Type {
 			case "message":
 				role := strings.TrimSpace(strings.ToLower(p.Role))
+				if !isConversationRole(role) {
+					continue
+				}
 				parts := parseContentParts(p.Content)
 				for _, part := range parts {
 					text := strings.TrimSpace(part.Text)
 					if text == "" {
+						continue
+					}
+					if shouldDropCodexMessage(role, text) {
 						continue
 					}
 					msg := session.Message{
@@ -232,6 +239,35 @@ func (l *Loader) loadRollout(ctx context.Context, threadID, rolloutPath, fallbac
 				ir.Results = append(ir.Results, result)
 				resultCopy := result
 				ir.OrderedEvents = append(ir.OrderedEvents, session.Event{Kind: session.EventToolResult, Result: &resultCopy})
+
+			case "custom_tool_call":
+				callID := strings.TrimSpace(p.CallID)
+				if callID == "" {
+					callIndex++
+					callID = fmt.Sprintf("call_missing_%d", callIndex)
+				}
+				args := decodeCustomInput(p.Input)
+				callIndex++
+				call := session.ToolCall{
+					SourceID:  callID,
+					Name:      strings.TrimSpace(p.Name),
+					Input:     args,
+					Index:     callIndex,
+					Timestamp: chooseCodexTS(ts, ir.StartedAt),
+				}
+				ir.Calls = append(ir.Calls, call)
+				callCopy := call
+				ir.OrderedEvents = append(ir.OrderedEvents, session.Event{Kind: session.EventToolCall, Call: &callCopy})
+
+			case "custom_tool_call_output":
+				result := session.ToolResult{
+					CallSourceID: strings.TrimSpace(p.CallID),
+					Output:       stringifyOutput(p.Output),
+					Timestamp:    chooseCodexTS(ts, ir.StartedAt),
+				}
+				ir.Results = append(ir.Results, result)
+				resultCopy := result
+				ir.OrderedEvents = append(ir.OrderedEvents, session.Event{Kind: session.EventToolResult, Result: &resultCopy})
 			}
 		}
 	}
@@ -263,6 +299,29 @@ func parseContentParts(raw json.RawMessage) []contentPart {
 		return []contentPart{single}
 	}
 	return nil
+}
+
+func decodeCustomInput(v any) map[string]any {
+	if v == nil {
+		return map[string]any{}
+	}
+	switch x := v.(type) {
+	case string:
+		x = strings.TrimSpace(x)
+		if x == "" {
+			return map[string]any{}
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(x), &m); err == nil && m != nil {
+			return m
+		}
+		return map[string]any{"content": x}
+	case map[string]any:
+		return x
+	default:
+		b, _ := json.Marshal(x)
+		return map[string]any{"content": string(b)}
+	}
 }
 
 func decodeArguments(v any) map[string]any {
@@ -316,4 +375,45 @@ func chooseCodexTS(ts, fallback time.Time) time.Time {
 		return fallback
 	}
 	return ts.UTC()
+}
+
+func isConversationRole(role string) bool {
+	return role == "user" || role == "assistant"
+}
+
+func shouldDropCodexMessage(role, text string) bool {
+	normalized := strings.TrimSpace(strings.ToLower(text))
+	if normalized == "" {
+		return true
+	}
+
+	// Codex-local envelopes and instruction injections are not user conversation content.
+	prefixes := []string{
+		"<permissions instructions>",
+		"<collaboration_mode>",
+		"<environment_context>",
+		"<subagent_notification>",
+		"<local-command-caveat>",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(normalized, p) {
+			return true
+		}
+	}
+
+	if strings.HasPrefix(normalized, "# agents.md instructions for ") {
+		return true
+	}
+	if strings.Contains(normalized, "agents.md instructions for ") {
+		return true
+	}
+	if strings.Contains(normalized, "<local-command-stdout>") ||
+		strings.Contains(normalized, "<local-command-stderr>") ||
+		strings.Contains(normalized, "<command-name>") ||
+		strings.Contains(normalized, "<command-message>") ||
+		strings.Contains(normalized, "<command-args>") {
+		return true
+	}
+
+	return false
 }
