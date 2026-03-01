@@ -196,6 +196,9 @@ func (l *Loader) loadSessionFile(ctx context.Context, requestedID, path string) 
 					pendingReasoning += "\n" + item.Reasoning
 				}
 			case "text":
+				if role == "user" && isLocalCommandEnvelopeMessage(item.Text) {
+					continue
+				}
 				m := session.Message{
 					Role:      role,
 					Content:   item.Text,
@@ -386,4 +389,28 @@ func asString(v any) string {
 	default:
 		return ""
 	}
+}
+
+func isLocalCommandEnvelopeMessage(text string) bool {
+	t := strings.ToLower(strings.TrimSpace(text))
+	if t == "" {
+		return false
+	}
+	prefixes := []string{
+		"<local-command-caveat>",
+		"<local-command-stdout>",
+		"<local-command-stderr>",
+		"<local-command-status>",
+		"<command-name>",
+		"<command-message>",
+		"<command-args>",
+		"<command-result>",
+		"<command-exit-code>",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(t, p) {
+			return true
+		}
+	}
+	return false
 }

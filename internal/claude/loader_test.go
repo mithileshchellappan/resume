@@ -140,3 +140,39 @@ func TestLoaderStripsToolUseErrorWrapper(t *testing.T) {
 		t.Fatalf("wrapped tool error should be stripped: got %q want %q", got, want)
 	}
 }
+
+func TestLoaderIgnoresLocalCommandEnvelopeMessages(t *testing.T) {
+	home := t.TempDir()
+	projectDir := filepath.Join(home, "projects", "proj-local-cmd")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionPath := filepath.Join(projectDir, "sess-local-cmd.jsonl")
+
+	sessionContent := "" +
+		`{"type":"user","timestamp":"2026-03-01T07:46:35Z","message":{"role":"user","content":"real user message"}}` + "\n" +
+		`{"type":"assistant","timestamp":"2026-03-01T07:46:36Z","message":{"role":"assistant","content":[{"type":"text","text":"real assistant message"}]}}` + "\n" +
+		`{"type":"user","timestamp":"2026-03-01T07:46:37Z","message":{"role":"user","content":"<local-command-caveat>ignore me</local-command-caveat>"}}` + "\n" +
+		`{"type":"user","timestamp":"2026-03-01T07:46:38Z","message":{"role":"user","content":"<command-name>/exit</command-name>\n<command-message>exit</command-message>\n<command-args></command-args>"}}` + "\n" +
+		`{"type":"user","timestamp":"2026-03-01T07:46:39Z","message":{"role":"user","content":"<local-command-stdout>Catch you later!</local-command-stdout>"}}` + "\n"
+	if err := os.WriteFile(sessionPath, []byte(sessionContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	indexJSON := `{"version":1,"entries":[{"sessionId":"sess-local-cmd","fullPath":"` + sessionPath + `"}]}`
+	if err := os.WriteFile(filepath.Join(projectDir, "sessions-index.json"), []byte(indexJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewLoader(home)
+	ir, err := loader.LoadBySessionID(context.Background(), "sess-local-cmd")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got, want := len(ir.Messages), 2; got != want {
+		t.Fatalf("unexpected message count: got %d want %d, messages=%+v", got, want, ir.Messages)
+	}
+	if ir.Messages[0].Content != "real user message" || ir.Messages[1].Content != "real assistant message" {
+		t.Fatalf("unexpected messages: %+v", ir.Messages)
+	}
+}
