@@ -667,20 +667,6 @@ func buildAgentToolUseResult(toolInput map[string]any, output, rawOutput string)
 }
 
 func buildAskUserQuestionToolUseResult(toolInput map[string]any, output, rawOutput string) any {
-	payload := map[string]any{}
-	if p, ok := parseJSONMap(rawOutput); ok {
-		payload = p
-	} else if p, ok := parseJSONMap(output); ok {
-		payload = p
-	} else {
-		return output
-	}
-
-	rawAnswers, ok := payload["answers"].(map[string]any)
-	if !ok || rawAnswers == nil {
-		return output
-	}
-
 	questions := []any{}
 	questionByID := map[string]string{}
 	if toolInput != nil {
@@ -700,6 +686,46 @@ func buildAskUserQuestionToolUseResult(toolInput map[string]any, output, rawOutp
 		}
 	}
 
+	result := map[string]any{
+		"questions": questions,
+		"answers":   map[string]any{},
+	}
+
+	setFallbackAnswer := func() {
+		text := strings.TrimSpace(output)
+		if text == "" {
+			text = strings.TrimSpace(rawOutput)
+		}
+		if text == "" {
+			return
+		}
+		answers, _ := result["answers"].(map[string]any)
+		if answers == nil {
+			answers = map[string]any{}
+			result["answers"] = answers
+		}
+		answers["response"] = text
+	}
+
+	payload := map[string]any{}
+	if p, ok := parseJSONMap(rawOutput); ok {
+		payload = p
+	} else if p, ok := parseJSONMap(output); ok {
+		payload = p
+	} else {
+		setFallbackAnswer()
+		return result
+	}
+
+	rawAnswers, ok := payload["answers"].(map[string]any)
+	if !ok || rawAnswers == nil {
+		setFallbackAnswer()
+		if annotations, ok := payload["annotations"].(map[string]any); ok && len(annotations) > 0 {
+			result["annotations"] = annotations
+		}
+		return result
+	}
+
 	answers := map[string]any{}
 	for key, value := range rawAnswers {
 		answerText := strings.TrimSpace(extractAskUserAnswerText(value))
@@ -716,13 +742,14 @@ func buildAskUserQuestionToolUseResult(toolInput map[string]any, output, rawOutp
 		answers[questionKey] = answerText
 	}
 	if len(answers) == 0 {
-		return output
+		setFallbackAnswer()
+		if annotations, ok := payload["annotations"].(map[string]any); ok && len(annotations) > 0 {
+			result["annotations"] = annotations
+		}
+		return result
 	}
 
-	result := map[string]any{
-		"questions": questions,
-		"answers":   answers,
-	}
+	result["answers"] = answers
 	if annotations, ok := payload["annotations"].(map[string]any); ok && len(annotations) > 0 {
 		result["annotations"] = annotations
 	}

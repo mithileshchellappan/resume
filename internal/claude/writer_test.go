@@ -545,6 +545,69 @@ func TestWriterBuildsStructuredAskUserQuestionToolUseResult(t *testing.T) {
 	}
 }
 
+func TestBuildAskUserQuestionToolUseResultAlwaysObject(t *testing.T) {
+	toolInput := map[string]any{
+		"questions": []any{
+			map[string]any{
+				"id":       "scope",
+				"question": "Choose scope?",
+			},
+		},
+	}
+
+	tests := []struct {
+		name         string
+		output       string
+		rawOutput    string
+		wantResponse bool
+	}{
+		{
+			name:         "truncated wrapper with partial json",
+			output:       "[truncated for target model context; original chars=256, removed=160]\n{\"answers\":{\"scope\":{\"answers\":[\"All tool parity\"",
+			rawOutput:    "",
+			wantResponse: true,
+		},
+		{
+			name:         "plain text fallback",
+			output:       "user selected option 2",
+			rawOutput:    "",
+			wantResponse: true,
+		},
+		{
+			name:         "empty output keeps empty answers map",
+			output:       "",
+			rawOutput:    "",
+			wantResponse: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotAny := buildAskUserQuestionToolUseResult(toolInput, tt.output, tt.rawOutput)
+			got, ok := gotAny.(map[string]any)
+			if !ok {
+				t.Fatalf("expected map toolUseResult, got %T", gotAny)
+			}
+			answers, ok := got["answers"].(map[string]any)
+			if !ok || answers == nil {
+				t.Fatalf("expected answers map, got %#v", got["answers"])
+			}
+			if tt.wantResponse {
+				resp, ok := answers["response"].(string)
+				if !ok || strings.TrimSpace(resp) == "" {
+					t.Fatalf("expected fallback response, got %#v", answers["response"])
+				}
+			}
+			if !tt.wantResponse && len(answers) != 0 {
+				t.Fatalf("expected empty answers map, got %#v", answers)
+			}
+			if _, ok := got["questions"].([]any); !ok {
+				t.Fatalf("expected questions array, got %#v", got["questions"])
+			}
+		})
+	}
+}
+
 func TestWriterNormalizesCodexToolNames(t *testing.T) {
 	tests := []struct {
 		name      string
