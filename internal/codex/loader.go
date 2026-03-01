@@ -85,15 +85,16 @@ func (l *Loader) ListSessions(ctx context.Context) ([]session.SourceSession, err
 			continue
 		}
 
-		rows, queryErr := db.QueryContext(ctx, `SELECT id, rollout_path, cwd, title, updated_at FROM threads ORDER BY updated_at DESC`)
+		rows, queryErr := db.QueryContext(ctx, `SELECT id, rollout_path, cwd, title, git_branch, updated_at FROM threads ORDER BY updated_at DESC`)
 		if queryErr != nil {
 			_ = db.Close()
 			continue
 		}
 		for rows.Next() {
 			var id, rolloutPath, cwd, title string
+			var gitBranch sql.NullString
 			var updatedAt int64
-			if scanErr := rows.Scan(&id, &rolloutPath, &cwd, &title, &updatedAt); scanErr != nil {
+			if scanErr := rows.Scan(&id, &rolloutPath, &cwd, &title, &gitBranch, &updatedAt); scanErr != nil {
 				continue
 			}
 			id = strings.TrimSpace(id)
@@ -102,9 +103,6 @@ func (l *Loader) ListSessions(ctx context.Context) ([]session.SourceSession, err
 			}
 			rolloutPath = strings.TrimSpace(rolloutPath)
 			if rolloutPath == "" {
-				continue
-			}
-			if _, statErr := os.Stat(rolloutPath); statErr != nil {
 				continue
 			}
 			seen[id] = true
@@ -116,10 +114,16 @@ func (l *Loader) ListSessions(ctx context.Context) ([]session.SourceSession, err
 			if title == "" {
 				title = id
 			}
+			stat, statErr := os.Stat(rolloutPath)
+			if statErr != nil {
+				continue
+			}
 			item := session.SourceSession{
-				ID:    id,
-				CWD:   cwd,
-				Title: title,
+				ID:        id,
+				CWD:       cwd,
+				Title:     title,
+				GitBranch: strings.TrimSpace(gitBranch.String),
+				SizeBytes: stat.Size(),
 			}
 			if updatedAt > 0 {
 				item.UpdatedAt = time.Unix(updatedAt, 0).UTC()

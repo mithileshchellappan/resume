@@ -235,6 +235,9 @@ func TestLoaderListSessions(t *testing.T) {
 	if sessions[0].CWD != "/repo/new" {
 		t.Fatalf("unexpected cwd: %q", sessions[0].CWD)
 	}
+	if sessions[0].SizeBytes == 0 {
+		t.Fatalf("expected non-zero size bytes")
+	}
 	if sessions[1].Title != "sess-old" {
 		t.Fatalf("expected fallback title to id, got %q", sessions[1].Title)
 	}

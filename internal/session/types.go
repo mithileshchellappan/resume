@@ -66,6 +66,8 @@ type SourceSession struct {
 	CWD       string
 	Title     string
 	UpdatedAt time.Time
+	GitBranch string
+	SizeBytes int64
 }
 
 // CodexItemKind identifies the logical item that will be encoded to Codex JSONL.

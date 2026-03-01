@@ -286,6 +286,9 @@ func TestLoaderListSessions(t *testing.T) {
 	if sessions[0].CWD != "/repo/b" {
 		t.Fatalf("unexpected cwd: %q", sessions[0].CWD)
 	}
+	if sessions[0].SizeBytes != 0 {
+		t.Fatalf("unexpected size: %d", sessions[0].SizeBytes)
+	}
 	if sessions[0].UpdatedAt.IsZero() {
 		t.Fatalf("expected non-zero updated_at")
 	}

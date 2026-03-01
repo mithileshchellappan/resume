@@ -191,6 +191,7 @@ type claudeLine struct {
 	Type      string          `json:"type"`
 	Timestamp string          `json:"timestamp"`
 	CWD       string          `json:"cwd"`
+	GitBranch string          `json:"gitBranch"`
 	SessionID string          `json:"sessionId"`
 	Message   json.RawMessage `json:"message"`
 }
@@ -350,6 +351,7 @@ func (l *Loader) summarizeSessionFile(ctx context.Context, id, path string) sess
 	}
 	if stat, err := os.Stat(path); err == nil {
 		summary.UpdatedAt = stat.ModTime().UTC()
+		summary.SizeBytes = stat.Size()
 	}
 
 	f, err := os.Open(path)
@@ -377,6 +379,9 @@ func (l *Loader) summarizeSessionFile(ctx context.Context, id, path string) sess
 		}
 		if summary.CWD == "." && strings.TrimSpace(line.CWD) != "" {
 			summary.CWD = strings.TrimSpace(line.CWD)
+		}
+		if summary.GitBranch == "" && strings.TrimSpace(line.GitBranch) != "" {
+			summary.GitBranch = strings.TrimSpace(line.GitBranch)
 		}
 		if line.Timestamp != "" && summary.UpdatedAt.IsZero() {
 			if ts := parseTS(line.Timestamp); !ts.IsZero() {

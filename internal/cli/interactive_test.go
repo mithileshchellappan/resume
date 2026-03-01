@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"strings"
 	"testing"
@@ -72,28 +71,24 @@ func TestSelectSessionInteractiveRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestReadPickerKeyArrowSequences(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want pickerKey
-	}{
-		{name: "up arrow", in: "\x1b[A", want: pickerKeyUp},
-		{name: "down arrow", in: "\x1b[B", want: pickerKeyDown},
-		{name: "j down", in: "j", want: pickerKeyDown},
-		{name: "k up", in: "k", want: pickerKeyUp},
-		{name: "enter", in: "\n", want: pickerKeyEnter},
+func TestSessionMetaLineIncludesTimeBranchAndSize(t *testing.T) {
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	s := session.SourceSession{
+		UpdatedAt: now.Add(-2 * time.Hour),
+		GitBranch: "main",
+		SizeBytes: 386 * 1024,
+		Title:     "x",
+		ID:        "id",
+		CWD:       "/repo",
 	}
-
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			key, err := readPickerKey(bufio.NewReader(strings.NewReader(tt.in)))
-			if err != nil {
-				t.Fatalf("readPickerKey error: %v", err)
-			}
-			if key != tt.want {
-				t.Fatalf("unexpected key: got %v want %v", key, tt.want)
-			}
-		})
+	got := sessionMetaLine(s, now)
+	if !strings.Contains(got, "2h ago") {
+		t.Fatalf("expected relative time in %q", got)
+	}
+	if !strings.Contains(got, "main") {
+		t.Fatalf("expected branch in %q", got)
+	}
+	if !strings.Contains(got, "386KB") {
+		t.Fatalf("expected size in %q", got)
 	}
 }

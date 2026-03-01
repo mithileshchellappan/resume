@@ -7,7 +7,7 @@
 - Directions supported:
   - `claude -> codex`
   - `codex -> claude`
-- No TUI; strict flag-based CLI
+- Interactive TUI picker (search + arrow-key navigation) when `--id` is omitted
 - Writes to native Codex stores (`sessions/`, `state_*.sqlite`, `session_index.jsonl`)
 - No compaction in this POC
 
