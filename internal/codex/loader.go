@@ -46,6 +46,99 @@ func (l *Loader) LoadByThreadID(ctx context.Context, id string) (session.Session
 	return l.loadRollout(ctx, id, rolloutPath, cwd, createdAt)
 }
 
+func (l *Loader) ListSessions(ctx context.Context) ([]session.SourceSession, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	glob := filepath.Join(l.CodexHome, "state_*.sqlite")
+	paths, err := filepath.Glob(glob)
+	if err != nil {
+		return nil, fmt.Errorf("glob codex state dbs: %w", err)
+	}
+	if len(paths) == 0 {
+		return nil, nil
+	}
+
+	sort.Slice(paths, func(i, j int) bool {
+		si, ei := os.Stat(paths[i])
+		sj, ej := os.Stat(paths[j])
+		if ei != nil || ej != nil {
+			return paths[i] > paths[j]
+		}
+		return si.ModTime().After(sj.ModTime())
+	})
+
+	seen := map[string]bool{}
+	out := make([]session.SourceSession, 0)
+	for _, dbPath := range paths {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		db, openErr := sql.Open("sqlite", dbPath)
+		if openErr != nil {
+			continue
+		}
+
+		rows, queryErr := db.QueryContext(ctx, `SELECT id, rollout_path, cwd, title, updated_at FROM threads ORDER BY updated_at DESC`)
+		if queryErr != nil {
+			_ = db.Close()
+			continue
+		}
+		for rows.Next() {
+			var id, rolloutPath, cwd, title string
+			var updatedAt int64
+			if scanErr := rows.Scan(&id, &rolloutPath, &cwd, &title, &updatedAt); scanErr != nil {
+				continue
+			}
+			id = strings.TrimSpace(id)
+			if id == "" || seen[id] {
+				continue
+			}
+			rolloutPath = strings.TrimSpace(rolloutPath)
+			if rolloutPath == "" {
+				continue
+			}
+			if _, statErr := os.Stat(rolloutPath); statErr != nil {
+				continue
+			}
+			seen[id] = true
+			cwd = strings.TrimSpace(cwd)
+			if cwd == "" {
+				cwd = "."
+			}
+			title = strings.TrimSpace(title)
+			if title == "" {
+				title = id
+			}
+			item := session.SourceSession{
+				ID:    id,
+				CWD:   cwd,
+				Title: title,
+			}
+			if updatedAt > 0 {
+				item.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+			}
+			out = append(out, item)
+		}
+		_ = rows.Close()
+		_ = db.Close()
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out, nil
+}
+
 func (l *Loader) findThread(ctx context.Context, id string) (rolloutPath, cwd string, createdAt int64, err error) {
 	glob := filepath.Join(l.CodexHome, "state_*.sqlite")
 	paths, err := filepath.Glob(glob)

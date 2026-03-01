@@ -60,6 +60,14 @@ type SessionIR struct {
 	OrderedEvents []Event
 }
 
+// SourceSession is a source-native session summary used for interactive selection.
+type SourceSession struct {
+	ID        string
+	CWD       string
+	Title     string
+	UpdatedAt time.Time
+}
+
 // CodexItemKind identifies the logical item that will be encoded to Codex JSONL.
 type CodexItemKind string
 

@@ -10,6 +10,7 @@ func TestParseUsageErrors(t *testing.T) {
 		{name: "missing all", args: []string{}},
 		{name: "missing id", args: []string{"--from", "claude", "--to", "codex"}},
 		{name: "unsupported direction", args: []string{"--from", "claude", "--to", "claude", "--id", "x"}},
+		{name: "interactive missing from to", args: []string{"--interactive"}},
 	}
 
 	for _, tt := range tests {
@@ -62,5 +63,19 @@ func TestParseValidAndHelpVersion(t *testing.T) {
 	}
 	if opts.From != "codex" || opts.To != "claude" || opts.ID != "thread-1" {
 		t.Fatalf("unexpected reverse opts: %+v", opts)
+	}
+
+	opts, err = Parse([]string{"--from", "claude", "--to", "codex", "--interactive", "--source-folder", " /repo "})
+	if err != nil {
+		t.Fatalf("parse interactive valid: %v", err)
+	}
+	if !opts.Interactive {
+		t.Fatalf("expected interactive")
+	}
+	if opts.ID != "" {
+		t.Fatalf("expected empty id in interactive mode")
+	}
+	if opts.SourceFolder != "/repo" {
+		t.Fatalf("unexpected source folder: %q", opts.SourceFolder)
 	}
 }

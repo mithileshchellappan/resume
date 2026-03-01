@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/mithileshchellappan/resume/internal/session"
 )
@@ -174,5 +175,67 @@ func TestLoaderIgnoresLocalCommandEnvelopeMessages(t *testing.T) {
 	}
 	if ir.Messages[0].Content != "real user message" || ir.Messages[1].Content != "real assistant message" {
 		t.Fatalf("unexpected messages: %+v", ir.Messages)
+	}
+}
+
+func TestLoaderListSessions(t *testing.T) {
+	home := t.TempDir()
+	projectDir := filepath.Join(home, "projects", "proj-list")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeSession := func(id, cwd, userText string, modTime time.Time) string {
+		t.Helper()
+		path := filepath.Join(projectDir, id+".jsonl")
+		content := "" +
+			`{"type":"user","timestamp":"2026-03-01T07:30:29.647Z","cwd":"` + cwd + `","sessionId":"` + id + `","message":{"role":"user","content":"` + userText + `"}}` + "\n" +
+			`{"type":"assistant","timestamp":"2026-03-01T07:30:30.000Z","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}` + "\n"
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, modTime, modTime); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	newestPath := writeSession(
+		"sess-new",
+		"/repo/new",
+		"new title",
+		time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC),
+	)
+	oldestPath := writeSession(
+		"sess-old",
+		"/repo/old",
+		"",
+		time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC),
+	)
+
+	indexJSON := `{"version":1,"entries":[{"sessionId":"sess-old","fullPath":"` + oldestPath + `"},{"sessionId":"sess-new","fullPath":"` + newestPath + `"}]}`
+	if err := os.WriteFile(filepath.Join(projectDir, "sessions-index.json"), []byte(indexJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewLoader(home)
+	sessions, err := loader.ListSessions(context.Background())
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if got, want := len(sessions), 2; got != want {
+		t.Fatalf("session count mismatch: got %d want %d", got, want)
+	}
+	if sessions[0].ID != "sess-new" {
+		t.Fatalf("expected newest first, got %+v", sessions)
+	}
+	if sessions[0].Title != "new title" {
+		t.Fatalf("unexpected title: %q", sessions[0].Title)
+	}
+	if sessions[0].CWD != "/repo/new" {
+		t.Fatalf("unexpected cwd: %q", sessions[0].CWD)
+	}
+	if sessions[1].Title != "sess-old" {
+		t.Fatalf("expected fallback title to id, got %q", sessions[1].Title)
 	}
 }

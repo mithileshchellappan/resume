@@ -3,13 +3,17 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/mithileshchellappan/resume/internal/app"
 	"github.com/mithileshchellappan/resume/internal/buildinfo"
+	"github.com/mithileshchellappan/resume/internal/claude"
 	"github.com/mithileshchellappan/resume/internal/cli"
+	"github.com/mithileshchellappan/resume/internal/codex"
+	"github.com/mithileshchellappan/resume/internal/session"
 )
 
 func main() {
@@ -33,6 +37,32 @@ func run(args []string) int {
 		return app.ExitOK
 	}
 
+	if opts.ID == "" && opts.Interactive {
+		sessions, err := listSourceSessions(context.Background(), opts)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: list source sessions: %v\n", err)
+			return app.ExitConversion
+		}
+
+		folderHint := opts.SourceFolder
+		if folderHint == "" {
+			if wd, wdErr := os.Getwd(); wdErr == nil {
+				folderHint = wd
+			}
+		}
+		picked, err := cli.SelectSessionInteractive(os.Stdin, os.Stdout, sessions, folderHint)
+		if err != nil {
+			if errors.Is(err, cli.ErrNoSourceSessions) {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				return app.ExitConversion
+			}
+			fmt.Fprintf(os.Stderr, "error: interactive selection failed: %v\n", err)
+			return app.ExitUsage
+		}
+		opts.ID = picked.ID
+		fmt.Fprintf(os.Stdout, "selected source session: %s [%s]\n", picked.Title, picked.ID)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -52,15 +82,29 @@ func run(args []string) int {
 	return app.ExitOK
 }
 
+func listSourceSessions(ctx context.Context, opts cli.Options) ([]session.SourceSession, error) {
+	switch opts.From {
+	case "claude":
+		return claude.NewLoader(opts.ClaudeHome).ListSessions(ctx)
+	case "codex":
+		return codex.NewLoader(opts.CodexHome).ListSessions(ctx)
+	default:
+		return nil, fmt.Errorf("unsupported source tool: %s", opts.From)
+	}
+}
+
 func printUsage(w *os.File) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  resume --from claude --to codex --id <claude_session_id> [--claude-home <path>] [--codex-home <path>] [--cwd <target_cwd>] [--title <thread_title>] [--dry-run]")
 	fmt.Fprintln(w, "  resume --from codex --to claude --id <codex_thread_id> [--claude-home <path>] [--codex-home <path>] [--cwd <target_cwd>] [--title <session_title>] [--dry-run]")
+	fmt.Fprintln(w, "  resume --from <claude|codex> --to <codex|claude> --interactive [--source-folder <path>] [--claude-home <path>] [--codex-home <path>] [--cwd <target_cwd>] [--title <target_title>] [--dry-run]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  --from         Source tool (required)")
 	fmt.Fprintln(w, "  --to           Target tool (required)")
-	fmt.Fprintln(w, "  --id           Source session/thread id (required)")
+	fmt.Fprintln(w, "  --id           Source session/thread id (required unless --interactive)")
+	fmt.Fprintln(w, "  --interactive  Prompt to select source session by folder and title")
+	fmt.Fprintln(w, "  --source-folder  Source folder filter for --interactive (defaults to current directory)")
 	fmt.Fprintln(w, "  --claude-home  Claude home directory (default ~/.claude)")
 	fmt.Fprintln(w, "  --codex-home   Codex home directory (default ~/.codex)")
 	fmt.Fprintln(w, "  --cwd          Override target cwd")

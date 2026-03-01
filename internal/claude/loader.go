@@ -51,6 +51,88 @@ func (l *Loader) LoadBySessionID(ctx context.Context, id string) (session.Sessio
 	return l.loadSessionFile(ctx, id, sessionPath)
 }
 
+func (l *Loader) ListSessions(ctx context.Context) ([]session.SourceSession, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	pattern := filepath.Join(l.ClaudeHome, "projects", "*", "sessions-index.json")
+	indexPaths, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("glob claude session indexes: %w", err)
+	}
+	sort.Strings(indexPaths)
+
+	seenByPath := map[string]bool{}
+	out := make([]session.SourceSession, 0)
+	for _, idxPath := range indexPaths {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		b, readErr := os.ReadFile(idxPath)
+		if readErr != nil {
+			continue
+		}
+		var idx indexFile
+		if unmarshalErr := json.Unmarshal(b, &idx); unmarshalErr != nil {
+			continue
+		}
+		for _, entry := range idx.Entries {
+			id := strings.TrimSpace(entry.SessionID)
+			if id == "" {
+				continue
+			}
+			full := strings.TrimSpace(entry.FullPath)
+			if full == "" {
+				full = filepath.Join(filepath.Dir(idxPath), id+".jsonl")
+			}
+			full = filepath.Clean(full)
+			if seenByPath[full] {
+				continue
+			}
+			seenByPath[full] = true
+			out = append(out, l.summarizeSessionFile(ctx, id, full))
+		}
+	}
+
+	// Include sessions not yet present in sessions-index.json.
+	fallbackPattern := filepath.Join(l.ClaudeHome, "projects", "*", "*.jsonl")
+	fallbackPaths, ferr := filepath.Glob(fallbackPattern)
+	if ferr == nil {
+		sort.Strings(fallbackPaths)
+		for _, full := range fallbackPaths {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+			full = filepath.Clean(full)
+			if seenByPath[full] {
+				continue
+			}
+			seenByPath[full] = true
+			id := strings.TrimSuffix(filepath.Base(full), filepath.Ext(full))
+			if strings.TrimSpace(id) == "" {
+				continue
+			}
+			out = append(out, l.summarizeSessionFile(ctx, id, full))
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out, nil
+}
+
 func (l *Loader) findSessionPath(ctx context.Context, id string) (string, error) {
 	pattern := filepath.Join(l.ClaudeHome, "projects", "*", "sessions-index.json")
 	indexPaths, err := filepath.Glob(pattern)
@@ -258,6 +340,90 @@ func (l *Loader) loadSessionFile(ctx context.Context, requestedID, path string) 
 		ir.SourceID = requestedID
 	}
 	return ir, nil
+}
+
+func (l *Loader) summarizeSessionFile(ctx context.Context, id, path string) session.SourceSession {
+	summary := session.SourceSession{
+		ID:    strings.TrimSpace(id),
+		CWD:   ".",
+		Title: strings.TrimSpace(id),
+	}
+	if stat, err := os.Stat(path); err == nil {
+		summary.UpdatedAt = stat.ModTime().UTC()
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return summary
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 8*1024), 2*1024*1024)
+
+	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return summary
+		default:
+		}
+		lineText := strings.TrimSpace(scanner.Text())
+		if lineText == "" {
+			continue
+		}
+		var line claudeLine
+		if err := json.Unmarshal([]byte(lineText), &line); err != nil {
+			continue
+		}
+		if summary.CWD == "." && strings.TrimSpace(line.CWD) != "" {
+			summary.CWD = strings.TrimSpace(line.CWD)
+		}
+		if line.Timestamp != "" && summary.UpdatedAt.IsZero() {
+			if ts := parseTS(line.Timestamp); !ts.IsZero() {
+				summary.UpdatedAt = ts.UTC()
+			}
+		}
+		if len(line.Message) == 0 {
+			continue
+		}
+		var msg claudeMessage
+		if err := json.Unmarshal(line.Message, &msg); err != nil {
+			continue
+		}
+		role := strings.TrimSpace(strings.ToLower(msg.Role))
+		if role == "" {
+			role = line.Type
+		}
+		for _, item := range parseContent(msg.Content) {
+			if item.Kind != "text" {
+				continue
+			}
+			text := normalizeSessionTitle(item.Text)
+			if text == "" {
+				continue
+			}
+			if role != "user" {
+				continue
+			}
+			if isLocalCommandEnvelopeMessage(text) {
+				continue
+			}
+			summary.Title = text
+			return summary
+		}
+	}
+	return summary
+}
+
+func normalizeSessionTitle(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if len(s) > 140 {
+		return strings.TrimSpace(s[:140])
+	}
+	return s
 }
 
 func parseTS(s string) time.Time {

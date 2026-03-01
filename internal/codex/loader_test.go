@@ -232,3 +232,61 @@ func TestLoaderHandlesCustomToolCalls(t *testing.T) {
 		t.Fatalf("expected %d events, got %d", want, got)
 	}
 }
+
+func TestLoaderListSessions(t *testing.T) {
+	home := t.TempDir()
+	stateDB := filepath.Join(home, "state_1.sqlite")
+	createThreadsSchema(t, stateDB)
+	if err := os.MkdirAll(filepath.Join(home, "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", stateDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	insert := func(id, rolloutPath, cwd, title string, updatedAt int64) {
+		t.Helper()
+		_, execErr := db.Exec(`INSERT INTO threads (
+			id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+			sandbox_policy, approval_mode, tokens_used, has_user_event, archived,
+			archived_at, git_sha, git_branch, git_origin_url, cli_version, first_user_message
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, rolloutPath, updatedAt-10, updatedAt, "cli", "openai", cwd, title,
+			"{}", "on-request", 0, 1, 0, nil, nil, nil, nil, "test", "hello",
+		)
+		if execErr != nil {
+			t.Fatal(execErr)
+		}
+	}
+
+	existingRollout := filepath.Join(home, "sessions", "rollout-thread-2.jsonl")
+	if err := os.WriteFile(existingRollout, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	insert("thread-1", filepath.Join(home, "sessions", "missing.jsonl"), "/repo/a", "Fix parser", time.Date(2026, 3, 1, 8, 10, 0, 0, time.UTC).Unix())
+	insert("thread-2", existingRollout, "/repo/b", "", time.Date(2026, 3, 1, 8, 20, 0, 0, time.UTC).Unix())
+
+	loader := NewLoader(home)
+	sessions, err := loader.ListSessions(context.Background())
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if got, want := len(sessions), 1; got != want {
+		t.Fatalf("session count mismatch: got %d want %d", got, want)
+	}
+	if sessions[0].ID != "thread-2" {
+		t.Fatalf("expected newest first, got %+v", sessions)
+	}
+	if sessions[0].Title != "thread-2" {
+		t.Fatalf("expected title fallback to id, got %q", sessions[0].Title)
+	}
+	if sessions[0].CWD != "/repo/b" {
+		t.Fatalf("unexpected cwd: %q", sessions[0].CWD)
+	}
+	if sessions[0].UpdatedAt.IsZero() {
+		t.Fatalf("expected non-zero updated_at")
+	}
+}
