@@ -371,6 +371,99 @@ func TestWriterBuildsStructuredAgentToolUseResult(t *testing.T) {
 	}
 }
 
+func TestWriterBuildsStructuredAskUserQuestionToolUseResult(t *testing.T) {
+	home := t.TempDir()
+	w := NewWriter(home)
+	now := time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC)
+	w.Now = func() time.Time { return now }
+
+	ir := session.SessionIR{
+		SourceID:  "codex-thread-ask-user-question",
+		CWD:       "/Users/mithilesh/Code/clis/resume",
+		StartedAt: now,
+		OrderedEvents: []session.Event{
+			{Kind: session.EventToolCall, Call: &session.ToolCall{
+				SourceID: "call_ask_1",
+				Name:     "request_user_input",
+				Input: map[string]any{
+					"questions": []any{
+						map[string]any{
+							"id":       "fix_scope",
+							"header":   "Fix scope",
+							"question": "For the first patch, which compatibility scope do you want?",
+							"options": []any{
+								map[string]any{"label": "Edit-first (Recommended)", "description": "smallest change"},
+								map[string]any{"label": "All tool parity", "description": "broader change"},
+							},
+						},
+					},
+				},
+				Timestamp: now.Add(time.Second),
+			}},
+			{Kind: session.EventToolResult, Result: &session.ToolResult{
+				CallSourceID: "call_ask_1",
+				Output:       `{"answers":{"fix_scope":{"answers":["All tool parity"]}}}`,
+				Timestamp:    now.Add(2 * time.Second),
+			}},
+		},
+	}
+
+	_, sessionPath, err := w.Write(context.Background(), ir, session.ClaudeSessionMeta{CWD: ir.CWD})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f, err := os.Open(sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var askToolUseResult map[string]any
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var line map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			t.Fatalf("bad json line: %v", err)
+		}
+		msg, _ := line["message"].(map[string]any)
+		if msg == nil {
+			continue
+		}
+		content, _ := msg["content"].([]any)
+		if len(content) == 0 {
+			continue
+		}
+		first, _ := content[0].(map[string]any)
+		if first == nil {
+			continue
+		}
+		if kind, _ := first["type"].(string); kind == "tool_result" {
+			var ok bool
+			askToolUseResult, ok = line["toolUseResult"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected AskUserQuestion toolUseResult object, got %T", line["toolUseResult"])
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	questions, ok := askToolUseResult["questions"].([]any)
+	if !ok || len(questions) == 0 {
+		t.Fatalf("questions mismatch: %#v", askToolUseResult["questions"])
+	}
+	answers, ok := askToolUseResult["answers"].(map[string]any)
+	if !ok {
+		t.Fatalf("answers mismatch: %#v", askToolUseResult["answers"])
+	}
+	key := "For the first patch, which compatibility scope do you want?"
+	if got, _ := answers[key].(string); got != "All tool parity" {
+		t.Fatalf("answer mismatch: got %q want %q", got, "All tool parity")
+	}
+}
+
 func TestWriterNormalizesCodexToolNames(t *testing.T) {
 	tests := []struct {
 		name      string

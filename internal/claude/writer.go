@@ -308,6 +308,8 @@ func buildToolUseResult(toolName string, toolInput map[string]any, output, rawOu
 		return buildBashToolUseResult(output, rawOutput)
 	case "Agent":
 		return buildAgentToolUseResult(toolInput, output, rawOutput)
+	case "AskUserQuestion":
+		return buildAskUserQuestionToolUseResult(toolInput, output, rawOutput)
 	default:
 		return output
 	}
@@ -466,6 +468,92 @@ func buildAgentToolUseResult(toolInput map[string]any, output, rawOutput string)
 		"totalToolUseCount": totalToolUseCount,
 		"usage":             usage,
 	}
+}
+
+func buildAskUserQuestionToolUseResult(toolInput map[string]any, output, rawOutput string) any {
+	payload := map[string]any{}
+	if p, ok := parseJSONMap(rawOutput); ok {
+		payload = p
+	} else if p, ok := parseJSONMap(output); ok {
+		payload = p
+	} else {
+		return output
+	}
+
+	rawAnswers, ok := payload["answers"].(map[string]any)
+	if !ok || rawAnswers == nil {
+		return output
+	}
+
+	questions := []any{}
+	questionByID := map[string]string{}
+	if toolInput != nil {
+		if list, ok := toolInput["questions"].([]any); ok {
+			questions = list
+			for _, item := range list {
+				question, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				questionID := strings.TrimSpace(asStringValue(question["id"]))
+				questionText := strings.TrimSpace(asStringValue(question["question"]))
+				if questionID != "" && questionText != "" {
+					questionByID[questionID] = questionText
+				}
+			}
+		}
+	}
+
+	answers := map[string]any{}
+	for key, value := range rawAnswers {
+		answerText := strings.TrimSpace(extractAskUserAnswerText(value))
+		if answerText == "" {
+			continue
+		}
+		questionKey := strings.TrimSpace(key)
+		if mapped := strings.TrimSpace(questionByID[questionKey]); mapped != "" {
+			questionKey = mapped
+		}
+		if questionKey == "" {
+			continue
+		}
+		answers[questionKey] = answerText
+	}
+	if len(answers) == 0 {
+		return output
+	}
+
+	result := map[string]any{
+		"questions": questions,
+		"answers":   answers,
+	}
+	if annotations, ok := payload["annotations"].(map[string]any); ok && len(annotations) > 0 {
+		result["annotations"] = annotations
+	}
+	return result
+}
+
+func extractAskUserAnswerText(v any) string {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case []any:
+		parts := make([]string, 0, len(x))
+		for _, item := range x {
+			if s := strings.TrimSpace(extractAskUserAnswerText(item)); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, ", ")
+	case map[string]any:
+		if answers, ok := x["answers"]; ok {
+			return extractAskUserAnswerText(answers)
+		}
+		if answer, ok := x["answer"]; ok {
+			return extractAskUserAnswerText(answer)
+		}
+	}
+	return strings.TrimSpace(asStringValue(v))
 }
 
 func parseJSONMap(raw string) (map[string]any, bool) {
