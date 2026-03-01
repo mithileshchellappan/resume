@@ -880,7 +880,7 @@ func TestExtractPatchFilePath(t *testing.T) {
 	}
 }
 
-func TestNormalizeEventsForClaudeContextTruncatesOldContent(t *testing.T) {
+func TestNormalizeEventsForClaudeContextTruncatesOnlyToolResultContent(t *testing.T) {
 	huge := strings.Repeat("A", 4000)
 	events := []session.Event{
 		{
@@ -918,27 +918,24 @@ func TestNormalizeEventsForClaudeContextTruncatesOldContent(t *testing.T) {
 	}
 
 	out := normalizeEventsForClaudeContext(events, 1300)
-	if got, want := estimateEventsChars(out) <= 1300, true; got != want {
-		t.Fatalf("expected trimmed events within budget, got=%d", estimateEventsChars(out))
+	if got := out[0].Msg.Content; got != huge {
+		t.Fatalf("expected user message to remain unchanged, got %q", got[:min(len(got), 80)])
 	}
-
-	first := out[0].Msg.Content
-	if !strings.HasPrefix(first, "[truncated for target model context;") {
-		t.Fatalf("expected first message to be truncated, got %q", first[:min(len(first), 80)])
-	}
-	if got := out[3].Msg.Content; got != "kept recent context" {
-		t.Fatalf("recent assistant message should remain intact, got %q", got)
-	}
-
 	toolInput := out[1].Call.Input
 	newString, _ := toolInput["new_string"].(string)
-	if !strings.HasPrefix(newString, "[truncated for target model context;") {
-		t.Fatalf("expected tool input new_string truncation, got %q", newString[:min(len(newString), 80)])
+	if newString != huge {
+		t.Fatalf("expected tool input to remain unchanged, got %q", newString[:min(len(newString), 80)])
+	}
+	if got := out[2].Result.Output; !strings.HasPrefix(got, "[truncated for target model context;") {
+		t.Fatalf("expected tool result truncation, got %q", got[:min(len(got), 80)])
+	}
+	if got := out[3].Msg.Content; got != "kept recent context" {
+		t.Fatalf("assistant message should remain unchanged, got %q", got)
 	}
 }
 
-func TestNormalizeEventsForClaudeContextAppliesPerEventHardLimit(t *testing.T) {
-	huge := strings.Repeat("Z", claudeEventHardLimitChars+500)
+func TestNormalizeEventsForClaudeContextKeepsToolResultWhenWithinLimit(t *testing.T) {
+	huge := strings.Repeat("Z", 1200)
 	events := []session.Event{
 		{
 			Kind: session.EventToolResult,
@@ -949,12 +946,12 @@ func TestNormalizeEventsForClaudeContextAppliesPerEventHardLimit(t *testing.T) {
 		},
 	}
 
-	out := normalizeEventsForClaudeContext(events, 10_000_000)
+	out := normalizeEventsForClaudeContext(events, 10_000)
 	if len(out) != 1 || out[0].Result == nil {
 		t.Fatalf("unexpected output shape: %#v", out)
 	}
-	if got := out[0].Result.Output; !strings.HasPrefix(got, "[truncated for target model context;") {
-		t.Fatalf("expected hard-limit truncation, got %q", got[:min(len(got), 80)])
+	if got := out[0].Result.Output; got != huge {
+		t.Fatalf("expected output unchanged within limit")
 	}
 }
 
@@ -999,6 +996,13 @@ func TestNormalizeEventsForClaudeContextDoesNotMutateInput(t *testing.T) {
 				},
 			},
 		},
+		{
+			Kind: session.EventToolResult,
+			Result: &session.ToolResult{
+				CallSourceID: "call_1",
+				Output:       huge,
+			},
+		},
 	}
 
 	_ = normalizeEventsForClaudeContext(events, 1200)
@@ -1009,5 +1013,8 @@ func TestNormalizeEventsForClaudeContextDoesNotMutateInput(t *testing.T) {
 	gotNewString, _ := events[1].Call.Input["new_string"].(string)
 	if gotNewString != huge {
 		t.Fatalf("input call args mutated")
+	}
+	if got := events[2].Result.Output; got != huge {
+		t.Fatalf("input tool result mutated")
 	}
 }

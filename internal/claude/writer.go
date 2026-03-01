@@ -25,11 +25,10 @@ const claudeToolIDLength = 24
 
 // Keep a conservative content budget: Claude session rendering duplicates
 // portions of tool payloads, so this must sit well below nominal model context.
-const claudeContextBudgetChars = 250_000
+const claudeMaxMCPOutputTokens = 25_000
+const claudeApproxCharsPerToken = 4
+const claudeContextBudgetChars = claudeMaxMCPOutputTokens * claudeApproxCharsPerToken
 const claudeTruncatedKeepChars = 256
-const claudeToolInputSoftLimitChars = 1_024
-const claudeEventHardLimitChars = 2_048
-const claudeToolInputHardLimitChars = 1_024
 const claudeTruncationPrefix = "[truncated for target model context;"
 
 type Writer struct {
@@ -316,32 +315,8 @@ func normalizeEventsForClaudeContext(events []session.Event, maxChars int) []ses
 
 	out := cloneEvents(events)
 	for i := range out {
-		out[i] = trimEventForContext(out[i], claudeEventHardLimitChars, claudeToolInputHardLimitChars)
-	}
-
-	total := estimateEventsChars(out)
-	if total <= maxChars {
-		return out
-	}
-
-	// Progressive passes preserve readability while forcing convergence under budget.
-	passPlan := []struct {
-		keepChars          int
-		toolInputSoftLimit int
-	}{
-		{keepChars: claudeTruncatedKeepChars, toolInputSoftLimit: claudeToolInputSoftLimitChars},
-		{keepChars: 96, toolInputSoftLimit: 256},
-		{keepChars: 64, toolInputSoftLimit: 64},
-	}
-	for _, pass := range passPlan {
-		for i := 0; i < len(out) && total > maxChars; i++ {
-			before := estimateEventChars(out[i])
-			out[i] = trimEventForContext(out[i], pass.keepChars, pass.toolInputSoftLimit)
-			after := estimateEventChars(out[i])
-			total -= before - after
-		}
-		if total <= maxChars {
-			break
+		if out[i].Kind == session.EventToolResult && out[i].Result != nil {
+			out[i].Result.Output = truncateForContext(out[i].Result.Output, maxChars)
 		}
 	}
 
