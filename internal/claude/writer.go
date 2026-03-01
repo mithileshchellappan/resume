@@ -23,11 +23,10 @@ var ErrWrite = errors.New("claude native write failed")
 const defaultClaudeVersion = "2.1.63"
 const claudeToolIDLength = 24
 
-// Keep a conservative content budget: Claude session rendering duplicates
-// portions of tool payloads, so this must sit well below nominal model context.
+// Mirror Anthropic default MCP output cap (25k tokens) for oversized tool results.
 const claudeMaxMCPOutputTokens = 25_000
 const claudeApproxCharsPerToken = 4
-const claudeContextBudgetChars = claudeMaxMCPOutputTokens * claudeApproxCharsPerToken
+const claudeToolResultMaxChars = claudeMaxMCPOutputTokens * claudeApproxCharsPerToken
 const claudeTruncatedKeepChars = 256
 const claudeTruncationPrefix = "[truncated for target model context;"
 
@@ -84,7 +83,7 @@ func (w *Writer) Write(ctx context.Context, in session.SessionIR, meta session.C
 }
 
 func writeSessionJSONL(path, sessionID, cwd, gitBranch string, startedAt time.Time, events []session.Event) error {
-	events = normalizeEventsForClaudeContext(events, claudeContextBudgetChars)
+	events = normalizeEventsForClaudeContext(events, claudeToolResultMaxChars)
 
 	tmp := path + ".tmp"
 	f, err := os.Create(tmp)
@@ -305,79 +304,22 @@ func chooseTS(ev session.Event, fallback, startedAt time.Time) time.Time {
 	return startedAt.UTC()
 }
 
-func normalizeEventsForClaudeContext(events []session.Event, maxChars int) []session.Event {
+func normalizeEventsForClaudeContext(events []session.Event, maxToolResultChars int) []session.Event {
 	if len(events) == 0 {
 		return events
 	}
-	if maxChars <= 0 {
-		maxChars = claudeContextBudgetChars
+	if maxToolResultChars <= 0 {
+		maxToolResultChars = claudeToolResultMaxChars
 	}
 
 	out := cloneEvents(events)
 	for i := range out {
 		if out[i].Kind == session.EventToolResult && out[i].Result != nil {
-			out[i].Result.Output = truncateForContext(out[i].Result.Output, maxChars)
+			out[i].Result.Output = truncateForContext(out[i].Result.Output, maxToolResultChars)
 		}
 	}
 
 	return out
-}
-
-func estimateEventsChars(events []session.Event) int {
-	total := 0
-	for _, ev := range events {
-		total += estimateEventChars(ev)
-	}
-	return total
-}
-
-func estimateEventChars(ev session.Event) int {
-	switch ev.Kind {
-	case session.EventUserMessage, session.EventAssistantMessage:
-		if ev.Msg == nil {
-			return 0
-		}
-		return len(ev.Msg.Content)
-	case session.EventToolCall:
-		if ev.Call == nil {
-			return 0
-		}
-		size := len(ev.Call.Name)
-		if ev.Call.Input != nil {
-			if b, err := json.Marshal(ev.Call.Input); err == nil {
-				size += len(b)
-			}
-		}
-		return size
-	case session.EventToolResult:
-		if ev.Result == nil {
-			return 0
-		}
-		return len(ev.Result.Output)
-	default:
-		return 0
-	}
-}
-
-func trimEventForContext(ev session.Event, keepChars, toolInputSoftLimit int) session.Event {
-	switch ev.Kind {
-	case session.EventUserMessage, session.EventAssistantMessage:
-		if ev.Msg == nil {
-			return ev
-		}
-		ev.Msg.Content = truncateForContext(ev.Msg.Content, keepChars)
-	case session.EventToolCall:
-		if ev.Call == nil || ev.Call.Input == nil {
-			return ev
-		}
-		ev.Call.Input = truncateInputForContext(ev.Call.Input, toolInputSoftLimit)
-	case session.EventToolResult:
-		if ev.Result == nil {
-			return ev
-		}
-		ev.Result.Output = truncateForContext(ev.Result.Output, keepChars)
-	}
-	return ev
 }
 
 func truncateForContext(s string, keepChars int) string {
@@ -409,38 +351,6 @@ func unwrapTruncatedBody(s string) (string, bool) {
 		return "", false
 	}
 	return s[newline+1:], true
-}
-
-func truncateInputForContext(in map[string]any, limit int) map[string]any {
-	out := make(map[string]any, len(in))
-	for k, v := range in {
-		out[k] = truncateAnyForContext(v, limit)
-	}
-	return out
-}
-
-func truncateAnyForContext(v any, limit int) any {
-	switch x := v.(type) {
-	case string:
-		if limit > 0 && len(x) > limit {
-			return truncateForContext(x, limit)
-		}
-		return x
-	case []any:
-		out := make([]any, len(x))
-		for i := range x {
-			out[i] = truncateAnyForContext(x[i], limit)
-		}
-		return out
-	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, vv := range x {
-			out[k] = truncateAnyForContext(vv, limit)
-		}
-		return out
-	default:
-		return v
-	}
 }
 
 func cloneEvents(events []session.Event) []session.Event {

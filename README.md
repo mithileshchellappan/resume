@@ -48,6 +48,17 @@ After interactive selection and successful migration (non-`--dry-run`), `resume`
 - `codex resume <thread_id>` for `claude -> codex`
 - `claude --resume <session_id>` for `codex -> claude`
 
+## Codex -> Claude Truncation Behavior
+
+- Migration preserves event ordering, message content, and tool linkage.
+- Truncation is applied only to oversized `tool_result` output payloads in Codex -> Claude migration.
+- Default cap mirrors Anthropic MCP defaults:
+  - `25,000` tokens approximated as `100,000` characters (`1 token ~= 4 chars`)
+- If output exceeds the cap, the payload is wrapped with:
+  - `[truncated for target model context; original chars=<N>, removed=<M>]`
+  - followed by the retained prefix text.
+- `AskUserQuestion` `toolUseResult` is always serialized as an object (never a raw string fallback), including truncated/invalid JSON outputs.
+
 ## Exit Codes
 
 - `0` success
