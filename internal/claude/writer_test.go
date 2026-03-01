@@ -158,7 +158,7 @@ func TestWriterNormalizesCodexToolNames(t *testing.T) {
 			},
 		},
 		{
-			name:     "spawn_agent to Agent",
+			name:     "spawn_agent to Agent with default type",
 			toolName: "spawn_agent",
 			input:    map[string]any{"agent_type": "default", "message": "search for bugs"},
 			wantName: "Agent",
@@ -166,8 +166,41 @@ func TestWriterNormalizesCodexToolNames(t *testing.T) {
 				if input["prompt"] != "search for bugs" {
 					t.Fatalf("prompt: %v", input["prompt"])
 				}
-				if input["subagent_type"] != "default" {
-					t.Fatalf("subagent_type: %v", input["subagent_type"])
+				if input["subagent_type"] != "general-purpose" {
+					t.Fatalf("subagent_type: got %v want general-purpose", input["subagent_type"])
+				}
+			},
+		},
+		{
+			name:     "spawn_agent normalizes explorer to Explore",
+			toolName: "spawn_agent",
+			input:    map[string]any{"agent_type": "explorer", "message": "find files"},
+			wantName: "Agent",
+			wantCheck: func(t *testing.T, input map[string]any) {
+				if input["subagent_type"] != "Explore" {
+					t.Fatalf("subagent_type: got %v want Explore", input["subagent_type"])
+				}
+			},
+		},
+		{
+			name:     "spawn_agent normalizes planner to Plan",
+			toolName: "spawn_agent",
+			input:    map[string]any{"agent_type": "planner", "message": "design approach"},
+			wantName: "Agent",
+			wantCheck: func(t *testing.T, input map[string]any) {
+				if input["subagent_type"] != "Plan" {
+					t.Fatalf("subagent_type: got %v want Plan", input["subagent_type"])
+				}
+			},
+		},
+		{
+			name:     "spawn_agent empty type defaults to general-purpose",
+			toolName: "spawn_agent",
+			input:    map[string]any{"agent_type": "", "message": "do stuff"},
+			wantName: "Agent",
+			wantCheck: func(t *testing.T, input map[string]any) {
+				if input["subagent_type"] != "general-purpose" {
+					t.Fatalf("subagent_type: got %v want general-purpose", input["subagent_type"])
 				}
 			},
 		},
@@ -201,6 +234,94 @@ func TestWriterNormalizesCodexToolNames(t *testing.T) {
 				tt.wantCheck(t, gotInput)
 			}
 		})
+	}
+}
+
+func TestWriterDropsCodexLifecycleTools(t *testing.T) {
+	home := t.TempDir()
+	w := NewWriter(home)
+	now := time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC)
+	w.Now = func() time.Time { return now }
+
+	ir := session.SessionIR{
+		SourceID:  "codex-thread-lifecycle",
+		CWD:       "/tmp/test",
+		StartedAt: now,
+		OrderedEvents: []session.Event{
+			{Kind: session.EventUserMessage, Msg: &session.Message{Role: "user", Content: "hello", Timestamp: now}},
+			// spawn_agent should be kept
+			{Kind: session.EventToolCall, Call: &session.ToolCall{SourceID: "call_spawn", Name: "spawn_agent", Input: map[string]any{"agent_type": "explorer", "message": "find stuff"}, Timestamp: now.Add(time.Second)}},
+			{Kind: session.EventToolResult, Result: &session.ToolResult{CallSourceID: "call_spawn", Output: `{"agent_id":"abc-123"}`, Timestamp: now.Add(2 * time.Second)}},
+			// wait should be dropped
+			{Kind: session.EventToolCall, Call: &session.ToolCall{SourceID: "call_wait", Name: "wait", Input: map[string]any{"ids": []any{"abc-123"}, "timeout_ms": 120000}, Timestamp: now.Add(3 * time.Second)}},
+			{Kind: session.EventToolResult, Result: &session.ToolResult{CallSourceID: "call_wait", Output: `{"status":"completed"}`, Timestamp: now.Add(4 * time.Second)}},
+			// close_agent should be dropped
+			{Kind: session.EventToolCall, Call: &session.ToolCall{SourceID: "call_close", Name: "close_agent", Input: map[string]any{"id": "abc-123"}, Timestamp: now.Add(5 * time.Second)}},
+			{Kind: session.EventToolResult, Result: &session.ToolResult{CallSourceID: "call_close", Output: `{"status":"closed"}`, Timestamp: now.Add(6 * time.Second)}},
+			{Kind: session.EventAssistantMessage, Msg: &session.Message{Role: "assistant", Content: "done", Timestamp: now.Add(7 * time.Second)}},
+		},
+	}
+
+	_, sessionPath, err := w.Write(context.Background(), ir, session.ClaudeSessionMeta{CWD: ir.CWD})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f, err := os.Open(sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var toolNames []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var line map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			t.Fatalf("bad json: %v", err)
+		}
+		msg, _ := line["message"].(map[string]any)
+		if msg == nil {
+			continue
+		}
+		content, _ := msg["content"].([]any)
+		if len(content) == 0 {
+			continue
+		}
+		first, _ := content[0].(map[string]any)
+		if first == nil {
+			continue
+		}
+		if kind, _ := first["type"].(string); kind == "tool_use" {
+			name, _ := first["name"].(string)
+			toolNames = append(toolNames, name)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only spawn_agent (normalized to Agent) should remain; wait and close_agent should be filtered.
+	if len(toolNames) != 1 {
+		t.Fatalf("expected 1 tool call, got %d: %v", len(toolNames), toolNames)
+	}
+	if toolNames[0] != "Agent" {
+		t.Fatalf("expected Agent, got %q", toolNames[0])
+	}
+}
+
+func TestIsCodexLifecycleTool(t *testing.T) {
+	lifecycle := []string{"wait", "close_agent", "Wait", "CLOSE_AGENT"}
+	for _, name := range lifecycle {
+		if !isCodexLifecycleTool(name) {
+			t.Fatalf("expected %q to be lifecycle tool", name)
+		}
+	}
+	notLifecycle := []string{"shell_command", "spawn_agent", "apply_patch", "mcp__foo__bar"}
+	for _, name := range notLifecycle {
+		if isCodexLifecycleTool(name) {
+			t.Fatalf("expected %q to NOT be lifecycle tool", name)
+		}
 	}
 }
 

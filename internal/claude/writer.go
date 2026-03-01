@@ -95,6 +95,7 @@ func writeSessionJSONL(path, sessionID, cwd, gitBranch string, startedAt time.Ti
 	}
 
 	callIDMap := map[string]string{}
+	droppedCalls := map[string]bool{} // source IDs of lifecycle tool calls to drop
 	prevUUID := ""
 	eventTS := startedAt
 	callCount := 0
@@ -166,6 +167,13 @@ func writeSessionJSONL(path, sessionID, cwd, gitBranch string, startedAt time.Ti
 			if ev.Call == nil {
 				continue
 			}
+			if isCodexLifecycleTool(ev.Call.Name) {
+				sourceID := strings.TrimSpace(ev.Call.SourceID)
+				if sourceID != "" {
+					droppedCalls[sourceID] = true
+				}
+				continue
+			}
 			sourceID := strings.TrimSpace(ev.Call.SourceID)
 			if sourceID == "" {
 				callCount++
@@ -205,6 +213,9 @@ func writeSessionJSONL(path, sessionID, cwd, gitBranch string, startedAt time.Ti
 				continue
 			}
 			callSourceID := strings.TrimSpace(ev.Result.CallSourceID)
+			if droppedCalls[callSourceID] {
+				continue
+			}
 			toolUseID := callIDMap[callSourceID]
 			if toolUseID == "" {
 				toolUseID = "toolu_" + strings.ReplaceAll(uuid.NewString(), "-", "")
@@ -310,7 +321,7 @@ func normalizeCodexToolForClaude(name string, input map[string]any) (string, map
 
 	case "spawn_agent":
 		prompt := strings.TrimSpace(asStringValue(input["message"]))
-		agentType := strings.TrimSpace(asStringValue(input["agent_type"]))
+		agentType := normalizeCodexAgentType(strings.TrimSpace(asStringValue(input["agent_type"])))
 		desc := prompt
 		if len(desc) > 50 {
 			desc = desc[:50]
@@ -329,6 +340,31 @@ func normalizeCodexToolForClaude(name string, input map[string]any) (string, map
 
 	default:
 		return name, input
+	}
+}
+
+// normalizeCodexAgentType maps Codex agent_type values to Claude subagent_type values.
+func normalizeCodexAgentType(agentType string) string {
+	switch strings.ToLower(agentType) {
+	case "explorer":
+		return "Explore"
+	case "planner":
+		return "Plan"
+	case "default", "":
+		return "general-purpose"
+	default:
+		return agentType
+	}
+}
+
+// isCodexLifecycleTool returns true for Codex-only agent lifecycle tools
+// that have no Claude equivalent and should be filtered during conversion.
+func isCodexLifecycleTool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "wait", "close_agent":
+		return true
+	default:
+		return false
 	}
 }
 

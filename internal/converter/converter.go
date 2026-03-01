@@ -260,8 +260,44 @@ func normalizeToolCall(name string, input map[string]any) (string, map[string]an
 		}
 		cmd := fmt.Sprintf("sed -n '%d,%dp' %s", start, end, shellQuote(path))
 		return "shell_command", map[string]any{"command": cmd}
+	case "agent":
+		message := strings.TrimSpace(asString(input["message"]))
+		if message == "" {
+			message = strings.TrimSpace(asString(input["prompt"]))
+		}
+
+		agentType := strings.TrimSpace(asString(input["agent_type"]))
+		if agentType == "" {
+			agentType = strings.TrimSpace(asString(input["subagent_type"]))
+		}
+		agentType = normalizeClaudeSubagentType(agentType)
+
+		out := map[string]any{}
+		if message != "" {
+			out["message"] = message
+		}
+		if agentType != "" {
+			out["agent_type"] = agentType
+		}
+		if items, ok := input["items"]; ok {
+			out["items"] = items
+		}
+		return "spawn_agent", out
 	}
 	return strings.TrimSpace(name), input
+}
+
+func normalizeClaudeSubagentType(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "explore":
+		return "explorer"
+	case "plan":
+		return "planner"
+	case "general-purpose", "default":
+		return "default"
+	default:
+		return strings.TrimSpace(v)
+	}
 }
 
 func asString(v any) string {
