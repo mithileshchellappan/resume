@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/mithileshchellappan/resume/internal/app"
@@ -16,6 +18,10 @@ import (
 	"github.com/mithileshchellappan/resume/internal/codex"
 	"github.com/mithileshchellappan/resume/internal/session"
 )
+
+var lookPath = exec.LookPath
+
+var supportedTools = []string{"claude", "codex"}
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -36,6 +42,11 @@ func run(args []string) int {
 	if opts.ShowVersion {
 		fmt.Fprintln(os.Stdout, buildinfo.Version)
 		return app.ExitOK
+	}
+	if err := resolveToolsFromFlagsOrPicker(&opts, os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n\n", err)
+		printUsage(os.Stderr)
+		return app.ExitCode(err)
 	}
 
 	selectedViaPicker := false
@@ -91,6 +102,115 @@ func run(args []string) int {
 	return app.ExitOK
 }
 
+func resolveToolsFromFlagsOrPicker(opts *cli.Options, in io.Reader, out io.Writer) error {
+	installed := detectInstalledTools(lookPath)
+	return resolveToolsWithPicker(opts, installed, in, out, cli.SelectToolInteractive)
+}
+
+type toolPickerFunc func(in io.Reader, out io.Writer, title string, tools []string) (string, error)
+
+func resolveToolsWithPicker(opts *cli.Options, installed []string, in io.Reader, out io.Writer, picker toolPickerFunc) error {
+	opts.From = strings.TrimSpace(strings.ToLower(opts.From))
+	opts.To = strings.TrimSpace(strings.ToLower(opts.To))
+	if opts.From != "" && opts.To != "" {
+		return nil
+	}
+
+	installed = normalizeInstalledTools(installed)
+	if len(installed) == 0 {
+		return cli.UsageError{Msg: "no supported tools found in PATH (expected: claude, codex)"}
+	}
+	if opts.From != "" && !containsTool(installed, opts.From) {
+		return cli.UsageError{Msg: fmt.Sprintf("source tool %q not found in PATH", opts.From)}
+	}
+	if opts.To != "" && !containsTool(installed, opts.To) {
+		return cli.UsageError{Msg: fmt.Sprintf("target tool %q not found in PATH", opts.To)}
+	}
+
+	if opts.From == "" {
+		candidates := append([]string(nil), installed...)
+		if opts.To != "" {
+			candidates = excludeTool(candidates, opts.To)
+		}
+		if len(candidates) == 0 {
+			return cli.UsageError{Msg: fmt.Sprintf("no source tool available in PATH for target %q", opts.To)}
+		}
+		picked, err := picker(in, out, "Select Source Tool", candidates)
+		if err != nil {
+			return cli.UsageError{Msg: fmt.Sprintf("select source tool: %v", err)}
+		}
+		opts.From = picked
+	}
+
+	if opts.To == "" {
+		candidates := excludeTool(installed, opts.From)
+		if len(candidates) == 0 {
+			return cli.UsageError{Msg: fmt.Sprintf("no target tool available in PATH for source %q", opts.From)}
+		}
+		picked, err := picker(in, out, "Select Target Tool", candidates)
+		if err != nil {
+			return cli.UsageError{Msg: fmt.Sprintf("select target tool: %v", err)}
+		}
+		opts.To = picked
+	}
+
+	if opts.From == opts.To {
+		return cli.UsageError{Msg: "source and target tools must be different"}
+	}
+	if !((opts.From == "claude" && opts.To == "codex") || (opts.From == "codex" && opts.To == "claude")) {
+		return cli.UsageError{Msg: "supported directions: --from claude --to codex OR --from codex --to claude"}
+	}
+	return nil
+}
+
+func detectInstalledTools(lookPathFn func(file string) (string, error)) []string {
+	tools := make([]string, 0, len(supportedTools))
+	for _, tool := range supportedTools {
+		if _, err := lookPathFn(tool); err == nil {
+			tools = append(tools, tool)
+		}
+	}
+	return tools
+}
+
+func normalizeInstalledTools(in []string) []string {
+	seen := map[string]bool{}
+	for _, raw := range in {
+		tool := strings.TrimSpace(strings.ToLower(raw))
+		if tool == "" {
+			continue
+		}
+		seen[tool] = true
+	}
+	out := make([]string, 0, len(supportedTools))
+	for _, tool := range supportedTools {
+		if seen[tool] {
+			out = append(out, tool)
+		}
+	}
+	return out
+}
+
+func containsTool(tools []string, target string) bool {
+	for _, tool := range tools {
+		if tool == target {
+			return true
+		}
+	}
+	return false
+}
+
+func excludeTool(tools []string, excluded string) []string {
+	out := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if tool == excluded {
+			continue
+		}
+		out = append(out, tool)
+	}
+	return out
+}
+
 func listSourceSessions(ctx context.Context, opts cli.Options) ([]session.SourceSession, error) {
 	switch opts.From {
 	case "claude":
@@ -134,11 +254,11 @@ func printUsage(w *os.File) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  resume --from claude --to codex --id <claude_session_id> [--claude-home <path>] [--codex-home <path>] [--cwd <target_cwd>] [--title <thread_title>] [--dry-run]")
 	fmt.Fprintln(w, "  resume --from codex --to claude --id <codex_thread_id> [--claude-home <path>] [--codex-home <path>] [--cwd <target_cwd>] [--title <session_title>] [--dry-run]")
-	fmt.Fprintln(w, "  resume --from <claude|codex> --to <codex|claude> [--source-folder <path>] [--claude-home <path>] [--codex-home <path>] [--cwd <target_cwd>] [--title <target_title>] [--dry-run]")
+	fmt.Fprintln(w, "  resume [--from <claude|codex>] [--to <codex|claude>] [--id <source_id>] [--source-folder <path>] [--claude-home <path>] [--codex-home <path>] [--cwd <target_cwd>] [--title <target_title>] [--dry-run]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
-	fmt.Fprintln(w, "  --from         Source tool (required)")
-	fmt.Fprintln(w, "  --to           Target tool (required)")
+	fmt.Fprintln(w, "  --from         Source tool (optional; picker shown when omitted)")
+	fmt.Fprintln(w, "  --to           Target tool (optional; picker shown when omitted)")
 	fmt.Fprintln(w, "  --id           Source session/thread id (optional; when omitted, interactive picker is used)")
 	fmt.Fprintln(w, "  --interactive  Force interactive source session picker (kept for compatibility; use ↑/↓ + Enter)")
 	fmt.Fprintln(w, "  --source-folder  Source folder filter for interactive picker (defaults to current directory)")

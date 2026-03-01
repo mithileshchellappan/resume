@@ -7,9 +7,10 @@ func TestParseUsageErrors(t *testing.T) {
 		name string
 		args []string
 	}{
-		{name: "missing all", args: []string{}},
 		{name: "unsupported direction", args: []string{"--from", "claude", "--to", "claude", "--id", "x"}},
-		{name: "interactive missing from to", args: []string{"--interactive"}},
+		{name: "invalid from", args: []string{"--from", "foo"}},
+		{name: "invalid to", args: []string{"--to", "bar"}},
+		{name: "unexpected positional", args: []string{"oops"}},
 	}
 
 	for _, tt := range tests {
@@ -87,5 +88,32 @@ func TestParseValidAndHelpVersion(t *testing.T) {
 	}
 	if opts.ID != "" {
 		t.Fatalf("expected empty id when id is omitted")
+	}
+
+	opts, err = Parse([]string{})
+	if err != nil {
+		t.Fatalf("parse empty args should be valid for interactive tool selection: %v", err)
+	}
+	if opts.From != "" || opts.To != "" {
+		t.Fatalf("expected empty from/to, got %+v", opts)
+	}
+	if !opts.Interactive {
+		t.Fatalf("expected interactive default when id is omitted")
+	}
+
+	opts, err = Parse([]string{"--from", "codex"})
+	if err != nil {
+		t.Fatalf("parse single from: %v", err)
+	}
+	if opts.From != "codex" || opts.To != "" {
+		t.Fatalf("unexpected opts for single from: %+v", opts)
+	}
+
+	opts, err = Parse([]string{"--to", "claude", "--id", "thread-123"})
+	if err != nil {
+		t.Fatalf("parse single to with id: %v", err)
+	}
+	if opts.From != "" || opts.To != "claude" {
+		t.Fatalf("unexpected opts for single to: %+v", opts)
 	}
 }

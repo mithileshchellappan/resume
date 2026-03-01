@@ -21,6 +21,7 @@
 resume --from claude --to codex --id <claude_session_id>
 resume --from codex --to claude --id <codex_thread_id>
 resume --from codex --to claude
+resume
 ```
 
 ## Install
@@ -34,14 +35,15 @@ Optional flags:
 
 - `--claude-home` (default `~/.claude`)
 - `--codex-home` (default `~/.codex`)
-- `--id` (optional; if omitted, interactive picker is used)
+- `--from` / `--to` (optional; when omitted, interactive tool pickers are used)
+- `--id` (optional; if omitted, interactive source session picker is used)
 - `--interactive` (optional compatibility flag to force picker)
 - `--source-folder` (folder filter for interactive picker; defaults to current directory)
 - `--cwd`
 - `--title`
 - `--dry-run`
 
-When using the interactive picker in a real terminal, use arrow keys (`↑`/`↓`) or `j`/`k`, then press `Enter` to choose.
+When using the interactive pickers in a real terminal, use arrow keys (`↑`/`↓`) or `j`/`k`, then press `Enter` to choose.
 After interactive selection and successful migration (non-`--dry-run`), `resume` automatically launches the target tool resume command:
 - `codex resume <thread_id>` for `claude -> codex`
 - `claude --resume <session_id>` for `codex -> claude`

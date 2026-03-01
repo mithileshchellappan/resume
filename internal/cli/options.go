@@ -55,8 +55,8 @@ func Parse(args []string) (Options, error) {
 	opts := Options{}
 	fs := NewFlagSet()
 
-	fs.StringVar(&opts.From, "from", "", "source tool (required)")
-	fs.StringVar(&opts.To, "to", "", "target tool (required)")
+	fs.StringVar(&opts.From, "from", "", "source tool (optional; picker shown when omitted)")
+	fs.StringVar(&opts.To, "to", "", "target tool (optional; picker shown when omitted)")
 	fs.StringVar(&opts.ID, "id", "", "source session id")
 	fs.BoolVar(&opts.Interactive, "interactive", false, "interactively select source session when --id is not provided")
 	fs.StringVar(&opts.ClaudeHome, "claude-home", filepath.Join(home, ".claude"), "Claude home directory")
@@ -83,10 +83,13 @@ func Parse(args []string) (Options, error) {
 	opts.ID = strings.TrimSpace(opts.ID)
 	opts.SourceFolder = strings.TrimSpace(opts.SourceFolder)
 
-	if opts.From == "" || opts.To == "" {
-		return Options{}, UsageError{Msg: "missing required flags: --from, --to"}
+	if opts.From != "" && !isSupportedTool(opts.From) {
+		return Options{}, UsageError{Msg: "unsupported --from value: use claude or codex"}
 	}
-	if !isSupportedDirection(opts.From, opts.To) {
+	if opts.To != "" && !isSupportedTool(opts.To) {
+		return Options{}, UsageError{Msg: "unsupported --to value: use claude or codex"}
+	}
+	if opts.From != "" && opts.To != "" && !isSupportedDirection(opts.From, opts.To) {
 		return Options{}, UsageError{Msg: "supported directions: --from claude --to codex OR --from codex --to claude"}
 	}
 	// Interactive selection is now the default path when --id is not provided.
@@ -116,4 +119,8 @@ func expandHome(path, home string) string {
 
 func isSupportedDirection(from, to string) bool {
 	return (from == "claude" && to == "codex") || (from == "codex" && to == "claude")
+}
+
+func isSupportedTool(tool string) bool {
+	return tool == "claude" || tool == "codex"
 }
