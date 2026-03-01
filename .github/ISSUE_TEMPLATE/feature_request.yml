@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest an improvement to the resume CLI
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement.
+        Please describe the use case and expected CLI behavior clearly.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      placeholder: "I want to migrate..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Include command/flag examples where possible.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context

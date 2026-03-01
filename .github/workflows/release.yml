@@ -1,0 +1,129 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
+      - "[0-9]*.[0-9]*.[0-9]*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: make test
+
+      - name: Prepare release metadata
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "TAG=${TAG}" >> "${GITHUB_ENV}"
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> "${GITHUB_ENV}"
+          echo "DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "${GITHUB_ENV}"
+
+      - name: Build release binaries
+        run: |
+          mkdir -p dist
+
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build \
+            -trimpath \
+            -ldflags "-s -w -X github.com/mithileshchellappan/resume/internal/buildinfo.Version=${TAG}" \
+            -o "dist/resume_${VERSION}_macOS_amd64" ./cmd/resume
+
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build \
+            -trimpath \
+            -ldflags "-s -w -X github.com/mithileshchellappan/resume/internal/buildinfo.Version=${TAG}" \
+            -o "dist/resume_${VERSION}_macOS_arm64" ./cmd/resume
+
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+            -trimpath \
+            -ldflags "-s -w -X github.com/mithileshchellappan/resume/internal/buildinfo.Version=${TAG}" \
+            -o "dist/resume_${VERSION}_linux_amd64" ./cmd/resume
+
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build \
+            -trimpath \
+            -ldflags "-s -w -X github.com/mithileshchellappan/resume/internal/buildinfo.Version=${TAG}" \
+            -o "dist/resume_${VERSION}_linux_arm64" ./cmd/resume
+
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+            -trimpath \
+            -ldflags "-s -w -X github.com/mithileshchellappan/resume/internal/buildinfo.Version=${TAG}" \
+            -o "dist/resume_${VERSION}_windows_amd64.exe" ./cmd/resume
+
+      - name: Create checksums
+        run: |
+          cd dist
+          sha256sum * > "resume_${VERSION}_checksums.txt"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew tap (optional)
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO }}
+          HOMEBREW_FORMULA_NAME: ${{ vars.HOMEBREW_FORMULA_NAME }}
+        run: |
+          if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
+            echo "HOMEBREW_TAP_TOKEN not set, skipping tap update."
+            exit 0
+          fi
+
+          TAP_REPO="${HOMEBREW_TAP_REPO:-mithileshchellappan/homebrew-tap}"
+          FORMULA_NAME="${HOMEBREW_FORMULA_NAME:-resume}"
+          FORMULA_CLASS="$(echo "${FORMULA_NAME}" | awk -F- '{for(i=1;i<=NF;i++){printf toupper(substr($i,1,1)) substr($i,2)}}')"
+          SHA256="$(sha256sum "dist/resume_${VERSION}_macOS_arm64" | awk '{print $1}')"
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+
+          cat > "tap/Formula/${FORMULA_NAME}.rb" <<EOF
+          # typed: false
+          # frozen_string_literal: true
+
+          class ${FORMULA_CLASS} < Formula
+            desc "Seamlessly switch AI coding agent sessions"
+            homepage "https://github.com/${GITHUB_REPOSITORY}"
+            url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/resume_${VERSION}_macOS_arm64"
+            version "${VERSION}"
+            sha256 "${SHA256}"
+            license "MIT"
+
+            depends_on :macos
+
+            def install
+              bin.install "resume_${VERSION}_macOS_arm64" => "resume"
+            end
+
+            test do
+              assert_match "Usage:", shell_output("#{bin}/resume --help")
+            end
+          end
+          EOF
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "Formula/${FORMULA_NAME}.rb"
+          git commit -m "chore: update ${FORMULA_NAME} to ${TAG}" || {
+            echo "No Homebrew formula changes to commit."
+            exit 0
+          }
+          git push
