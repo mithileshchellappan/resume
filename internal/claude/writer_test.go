@@ -895,6 +895,26 @@ func TestNormalizeEventsForClaudeContextAppliesPerEventHardLimit(t *testing.T) {
 	}
 }
 
+func TestTruncateForContextAvoidsNestedMarkers(t *testing.T) {
+	orig := strings.Repeat("output-line\n", 500)
+	first := truncateForContext(orig, 256)
+	second := truncateForContext(first, 96)
+
+	if got := strings.Count(second, claudeTruncationPrefix); got != 1 {
+		t.Fatalf("expected a single truncation marker, got %d in %q", got, second[:min(len(second), 120)])
+	}
+	body, ok := unwrapTruncatedBody(second)
+	if !ok {
+		t.Fatalf("expected truncation body")
+	}
+	if strings.HasPrefix(body, claudeTruncationPrefix) {
+		t.Fatalf("body should contain payload content, got nested marker")
+	}
+	if strings.TrimSpace(body) == "" {
+		t.Fatalf("body should retain payload content")
+	}
+}
+
 func TestNormalizeEventsForClaudeContextDoesNotMutateInput(t *testing.T) {
 	huge := strings.Repeat("B", 5000)
 	events := []session.Event{

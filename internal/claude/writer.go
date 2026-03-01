@@ -30,6 +30,7 @@ const claudeTruncatedKeepChars = 256
 const claudeToolInputSoftLimitChars = 1_024
 const claudeEventHardLimitChars = 2_048
 const claudeToolInputHardLimitChars = 1_024
+const claudeTruncationPrefix = "[truncated for target model context;"
 
 type Writer struct {
 	ClaudeHome string
@@ -330,7 +331,7 @@ func normalizeEventsForClaudeContext(events []session.Event, maxChars int) []ses
 	}{
 		{keepChars: claudeTruncatedKeepChars, toolInputSoftLimit: claudeToolInputSoftLimitChars},
 		{keepChars: 96, toolInputSoftLimit: 256},
-		{keepChars: 24, toolInputSoftLimit: 64},
+		{keepChars: 64, toolInputSoftLimit: 64},
 	}
 	for _, pass := range passPlan {
 		for i := 0; i < len(out) && total > maxChars; i++ {
@@ -408,12 +409,31 @@ func truncateForContext(s string, keepChars int) string {
 	if keepChars <= 0 {
 		keepChars = claudeTruncatedKeepChars
 	}
-	if len(s) <= keepChars {
-		return s
+	base := s
+	if body, ok := unwrapTruncatedBody(s); ok {
+		base = body
+		if len(base) <= keepChars {
+			// Already truncated and body is within limit; keep existing envelope.
+			return s
+		}
 	}
-	head := s[:keepChars]
-	removed := len(s) - keepChars
-	return fmt.Sprintf("[truncated for target model context; original chars=%d, removed=%d]\n%s", len(s), removed, head)
+	if len(base) <= keepChars {
+		return base
+	}
+	head := base[:keepChars]
+	removed := len(base) - keepChars
+	return fmt.Sprintf("[truncated for target model context; original chars=%d, removed=%d]\n%s", len(base), removed, head)
+}
+
+func unwrapTruncatedBody(s string) (string, bool) {
+	if !strings.HasPrefix(s, claudeTruncationPrefix) {
+		return "", false
+	}
+	newline := strings.IndexByte(s, '\n')
+	if newline < 0 || newline+1 >= len(s) {
+		return "", false
+	}
+	return s[newline+1:], true
 }
 
 func truncateInputForContext(in map[string]any, limit int) map[string]any {
