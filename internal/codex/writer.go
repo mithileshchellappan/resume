@@ -21,6 +21,7 @@ import (
 var ErrWrite = errors.New("codex native write failed")
 
 const defaultSandboxPolicy = `{"type":"workspace-write","network_access":false,"exclude_tmpdir_env_var":false,"exclude_slash_tmp":false}`
+const defaultCodexModel = "gpt-5.3-codex"
 
 type Writer struct {
 	CodexHome string
@@ -204,7 +205,7 @@ func writeRolloutFile(path, threadID string, s session.CodexSession, meta sessio
 				"exclude_tmpdir_env_var": false,
 				"exclude_slash_tmp":      false,
 			},
-			"model":       "gpt-5",
+			"model":       defaultCodexModel,
 			"personality": "pragmatic",
 			"effort":      "high",
 			"summary":     "auto",
