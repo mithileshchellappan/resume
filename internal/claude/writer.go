@@ -23,6 +23,14 @@ var ErrWrite = errors.New("claude native write failed")
 const defaultClaudeVersion = "2.1.63"
 const claudeToolIDLength = 24
 
+// Keep a conservative content budget: Claude session rendering duplicates
+// portions of tool payloads, so this must sit well below nominal model context.
+const claudeContextBudgetChars = 250_000
+const claudeTruncatedKeepChars = 256
+const claudeToolInputSoftLimitChars = 1_024
+const claudeEventHardLimitChars = 2_048
+const claudeToolInputHardLimitChars = 1_024
+
 type Writer struct {
 	ClaudeHome string
 	Now        func() time.Time
@@ -76,6 +84,8 @@ func (w *Writer) Write(ctx context.Context, in session.SessionIR, meta session.C
 }
 
 func writeSessionJSONL(path, sessionID, cwd, gitBranch string, startedAt time.Time, events []session.Event) error {
+	events = normalizeEventsForClaudeContext(events, claudeContextBudgetChars)
+
 	tmp := path + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
@@ -295,6 +305,176 @@ func chooseTS(ev session.Event, fallback, startedAt time.Time) time.Time {
 	return startedAt.UTC()
 }
 
+func normalizeEventsForClaudeContext(events []session.Event, maxChars int) []session.Event {
+	if len(events) == 0 {
+		return events
+	}
+	if maxChars <= 0 {
+		maxChars = claudeContextBudgetChars
+	}
+
+	out := cloneEvents(events)
+	for i := range out {
+		out[i] = trimEventForContext(out[i], claudeEventHardLimitChars, claudeToolInputHardLimitChars)
+	}
+
+	total := estimateEventsChars(out)
+	if total <= maxChars {
+		return out
+	}
+
+	// Progressive passes preserve readability while forcing convergence under budget.
+	passPlan := []struct {
+		keepChars          int
+		toolInputSoftLimit int
+	}{
+		{keepChars: claudeTruncatedKeepChars, toolInputSoftLimit: claudeToolInputSoftLimitChars},
+		{keepChars: 96, toolInputSoftLimit: 256},
+		{keepChars: 24, toolInputSoftLimit: 64},
+	}
+	for _, pass := range passPlan {
+		for i := 0; i < len(out) && total > maxChars; i++ {
+			before := estimateEventChars(out[i])
+			out[i] = trimEventForContext(out[i], pass.keepChars, pass.toolInputSoftLimit)
+			after := estimateEventChars(out[i])
+			total -= before - after
+		}
+		if total <= maxChars {
+			break
+		}
+	}
+
+	return out
+}
+
+func estimateEventsChars(events []session.Event) int {
+	total := 0
+	for _, ev := range events {
+		total += estimateEventChars(ev)
+	}
+	return total
+}
+
+func estimateEventChars(ev session.Event) int {
+	switch ev.Kind {
+	case session.EventUserMessage, session.EventAssistantMessage:
+		if ev.Msg == nil {
+			return 0
+		}
+		return len(ev.Msg.Content)
+	case session.EventToolCall:
+		if ev.Call == nil {
+			return 0
+		}
+		size := len(ev.Call.Name)
+		if ev.Call.Input != nil {
+			if b, err := json.Marshal(ev.Call.Input); err == nil {
+				size += len(b)
+			}
+		}
+		return size
+	case session.EventToolResult:
+		if ev.Result == nil {
+			return 0
+		}
+		return len(ev.Result.Output)
+	default:
+		return 0
+	}
+}
+
+func trimEventForContext(ev session.Event, keepChars, toolInputSoftLimit int) session.Event {
+	switch ev.Kind {
+	case session.EventUserMessage, session.EventAssistantMessage:
+		if ev.Msg == nil {
+			return ev
+		}
+		ev.Msg.Content = truncateForContext(ev.Msg.Content, keepChars)
+	case session.EventToolCall:
+		if ev.Call == nil || ev.Call.Input == nil {
+			return ev
+		}
+		ev.Call.Input = truncateInputForContext(ev.Call.Input, toolInputSoftLimit)
+	case session.EventToolResult:
+		if ev.Result == nil {
+			return ev
+		}
+		ev.Result.Output = truncateForContext(ev.Result.Output, keepChars)
+	}
+	return ev
+}
+
+func truncateForContext(s string, keepChars int) string {
+	if keepChars <= 0 {
+		keepChars = claudeTruncatedKeepChars
+	}
+	if len(s) <= keepChars {
+		return s
+	}
+	head := s[:keepChars]
+	removed := len(s) - keepChars
+	return fmt.Sprintf("[truncated for target model context; original chars=%d, removed=%d]\n%s", len(s), removed, head)
+}
+
+func truncateInputForContext(in map[string]any, limit int) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = truncateAnyForContext(v, limit)
+	}
+	return out
+}
+
+func truncateAnyForContext(v any, limit int) any {
+	switch x := v.(type) {
+	case string:
+		if limit > 0 && len(x) > limit {
+			return truncateForContext(x, limit)
+		}
+		return x
+	case []any:
+		out := make([]any, len(x))
+		for i := range x {
+			out[i] = truncateAnyForContext(x[i], limit)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, vv := range x {
+			out[k] = truncateAnyForContext(vv, limit)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func cloneEvents(events []session.Event) []session.Event {
+	out := make([]session.Event, 0, len(events))
+	for _, ev := range events {
+		clone := ev
+		switch ev.Kind {
+		case session.EventUserMessage, session.EventAssistantMessage:
+			if ev.Msg != nil {
+				m := *ev.Msg
+				clone.Msg = &m
+			}
+		case session.EventToolCall:
+			if ev.Call != nil {
+				c := *ev.Call
+				c.Input = cloneMap(ev.Call.Input)
+				clone.Call = &c
+			}
+		case session.EventToolResult:
+			if ev.Result != nil {
+				r := *ev.Result
+				clone.Result = &r
+			}
+		}
+		out = append(out, clone)
+	}
+	return out
+}
+
 type toolCallInfo struct {
 	Name  string
 	Input map[string]any
@@ -323,12 +503,8 @@ func buildFileToolUseResult(toolInput map[string]any) map[string]any {
 	filePath := firstNonEmptyString(toolInput["file_path"], toolInput["filePath"], toolInput["path"])
 	oldString := firstNonEmptyString(toolInput["old_string"], toolInput["oldString"])
 	newString := firstNonEmptyString(toolInput["new_string"], toolInput["newString"], toolInput["content"])
+	// Keep migrated output deterministic and bounded: never hydrate from local disk.
 	originalFile := firstNonEmptyString(toolInput["original_file"], toolInput["originalFile"], oldString)
-	if originalFile == "" && filePath != "" {
-		if b, err := os.ReadFile(filePath); err == nil {
-			originalFile = string(b)
-		}
-	}
 
 	replaceAll := false
 	if b, ok := asBoolValue(toolInput["replace_all"]); ok {

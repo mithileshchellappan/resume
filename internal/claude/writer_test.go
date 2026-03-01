@@ -290,6 +290,87 @@ func TestWriterBuildsStructuredEditToolUseResult(t *testing.T) {
 	}
 }
 
+func TestWriterEditToolUseResultDoesNotReadOriginalFileFromDisk(t *testing.T) {
+	home := t.TempDir()
+	w := NewWriter(home)
+	now := time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC)
+	w.Now = func() time.Time { return now }
+
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "main.go")
+	if err := os.WriteFile(target, []byte(strings.Repeat("x", 50_000)), 0o644); err != nil {
+		t.Fatalf("write target file: %v", err)
+	}
+
+	ir := session.SessionIR{
+		SourceID:  "codex-thread-edit-no-disk-hydrate",
+		CWD:       workspace,
+		StartedAt: now,
+		OrderedEvents: []session.Event{
+			{Kind: session.EventToolCall, Call: &session.ToolCall{
+				SourceID: "call_edit_1",
+				Name:     "Edit",
+				Input: map[string]any{
+					"file_path":  target,
+					"new_string": "new",
+				},
+				Timestamp: now.Add(time.Second),
+			}},
+			{Kind: session.EventToolResult, Result: &session.ToolResult{
+				CallSourceID: "call_edit_1",
+				Output:       "ok",
+				Timestamp:    now.Add(2 * time.Second),
+			}},
+		},
+	}
+
+	_, sessionPath, err := w.Write(context.Background(), ir, session.ClaudeSessionMeta{CWD: ir.CWD})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f, err := os.Open(sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var editToolUseResult map[string]any
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var line map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			t.Fatalf("bad json line: %v", err)
+		}
+		msg, _ := line["message"].(map[string]any)
+		if msg == nil {
+			continue
+		}
+		content, _ := msg["content"].([]any)
+		if len(content) == 0 {
+			continue
+		}
+		first, _ := content[0].(map[string]any)
+		if first == nil {
+			continue
+		}
+		if kind, _ := first["type"].(string); kind == "tool_result" {
+			var ok bool
+			editToolUseResult, ok = line["toolUseResult"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected Edit toolUseResult object, got %T", line["toolUseResult"])
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, _ := editToolUseResult["originalFile"].(string); got != "" {
+		t.Fatalf("originalFile should not be hydrated from disk: len=%d", len(got))
+	}
+}
+
 func TestWriterBuildsStructuredAgentToolUseResult(t *testing.T) {
 	home := t.TempDir()
 	w := NewWriter(home)
@@ -733,5 +814,117 @@ func TestExtractPatchFilePath(t *testing.T) {
 		if got != tt.want {
 			t.Fatalf("extractPatchFilePath(%q): got %q want %q", tt.patch[:min(30, len(tt.patch))], got, tt.want)
 		}
+	}
+}
+
+func TestNormalizeEventsForClaudeContextTruncatesOldContent(t *testing.T) {
+	huge := strings.Repeat("A", 4000)
+	events := []session.Event{
+		{
+			Kind: session.EventUserMessage,
+			Msg: &session.Message{
+				Role:    "user",
+				Content: huge,
+			},
+		},
+		{
+			Kind: session.EventToolCall,
+			Call: &session.ToolCall{
+				SourceID: "call_1",
+				Name:     "Edit",
+				Input: map[string]any{
+					"file_path":  "src/main.go",
+					"new_string": huge,
+				},
+			},
+		},
+		{
+			Kind: session.EventToolResult,
+			Result: &session.ToolResult{
+				CallSourceID: "call_1",
+				Output:       huge,
+			},
+		},
+		{
+			Kind: session.EventAssistantMessage,
+			Msg: &session.Message{
+				Role:    "assistant",
+				Content: "kept recent context",
+			},
+		},
+	}
+
+	out := normalizeEventsForClaudeContext(events, 1300)
+	if got, want := estimateEventsChars(out) <= 1300, true; got != want {
+		t.Fatalf("expected trimmed events within budget, got=%d", estimateEventsChars(out))
+	}
+
+	first := out[0].Msg.Content
+	if !strings.HasPrefix(first, "[truncated for target model context;") {
+		t.Fatalf("expected first message to be truncated, got %q", first[:min(len(first), 80)])
+	}
+	if got := out[3].Msg.Content; got != "kept recent context" {
+		t.Fatalf("recent assistant message should remain intact, got %q", got)
+	}
+
+	toolInput := out[1].Call.Input
+	newString, _ := toolInput["new_string"].(string)
+	if !strings.HasPrefix(newString, "[truncated for target model context;") {
+		t.Fatalf("expected tool input new_string truncation, got %q", newString[:min(len(newString), 80)])
+	}
+}
+
+func TestNormalizeEventsForClaudeContextAppliesPerEventHardLimit(t *testing.T) {
+	huge := strings.Repeat("Z", claudeEventHardLimitChars+500)
+	events := []session.Event{
+		{
+			Kind: session.EventToolResult,
+			Result: &session.ToolResult{
+				CallSourceID: "call_1",
+				Output:       huge,
+			},
+		},
+	}
+
+	out := normalizeEventsForClaudeContext(events, 10_000_000)
+	if len(out) != 1 || out[0].Result == nil {
+		t.Fatalf("unexpected output shape: %#v", out)
+	}
+	if got := out[0].Result.Output; !strings.HasPrefix(got, "[truncated for target model context;") {
+		t.Fatalf("expected hard-limit truncation, got %q", got[:min(len(got), 80)])
+	}
+}
+
+func TestNormalizeEventsForClaudeContextDoesNotMutateInput(t *testing.T) {
+	huge := strings.Repeat("B", 5000)
+	events := []session.Event{
+		{
+			Kind: session.EventUserMessage,
+			Msg: &session.Message{
+				Role:    "user",
+				Content: huge,
+			},
+		},
+		{
+			Kind: session.EventToolCall,
+			Call: &session.ToolCall{
+				SourceID: "call_1",
+				Name:     "Edit",
+				Input: map[string]any{
+					"file_path":  "src/main.go",
+					"new_string": huge,
+				},
+			},
+		},
+	}
+
+	_ = normalizeEventsForClaudeContext(events, 1200)
+
+	if got := events[0].Msg.Content; got != huge {
+		t.Fatalf("input message mutated")
+	}
+	gotNewString, _ := events[1].Call.Input["new_string"].(string)
+	if gotNewString != huge {
+		t.Fatalf("input call args mutated")
 	}
 }
