@@ -220,50 +220,46 @@ func normalizeToolCall(name string, input map[string]any) (string, map[string]an
 	case "bash":
 		cmdRaw, has := input["command"]
 		if !has {
-			return "shell", input
+			return "shell_command", input
 		}
 		switch cmd := cmdRaw.(type) {
 		case string:
-			out := map[string]any{"command": []any{"bash", "-lc", cmd}}
+			out := map[string]any{"command": cmd}
 			if desc := strings.TrimSpace(asString(input["description"])); desc != "" {
 				out["description"] = desc
 			}
-			return "shell", out
-		case []any:
-			return "shell", map[string]any{"command": cmd}
+			return "shell_command", out
 		default:
 			b, _ := json.Marshal(cmdRaw)
-			return "shell", map[string]any{"command": []any{"bash", "-lc", string(b)}}
+			return "shell_command", map[string]any{"command": string(b)}
 		}
 	case "glob":
-		out := map[string]any{}
+		cmd := "rg --files"
 		if pattern := strings.TrimSpace(asString(input["pattern"])); pattern != "" {
-			out["pattern"] = pattern
+			cmd += " -g " + shellQuote(pattern)
 		}
 		if path := strings.TrimSpace(asString(input["path"])); path != "" {
-			out["path"] = path
+			cmd += " " + shellQuote(path)
 		}
-		if len(out) == 0 {
-			return "glob", input
-		}
-		return "glob", out
+		return "shell_command", map[string]any{"command": cmd}
 	case "read":
-		out := map[string]any{}
-		if path := strings.TrimSpace(asString(input["file_path"])); path != "" {
-			out["path"] = path
-		} else if path := strings.TrimSpace(asString(input["path"])); path != "" {
-			out["path"] = path
+		path := strings.TrimSpace(asString(input["file_path"]))
+		if path == "" {
+			path = strings.TrimSpace(asString(input["path"]))
 		}
-		if offset, ok := input["offset"]; ok {
-			out["offset"] = offset
+		if path == "" {
+			return "shell_command", map[string]any{"command": "cat /dev/null"}
 		}
-		if limit, ok := input["limit"]; ok {
-			out["limit"] = limit
+		start := 1
+		end := 250
+		if offset, ok := asInt(input["offset"]); ok && offset > 0 {
+			start = offset + 1
 		}
-		if len(out) == 0 {
-			return "read_file", input
+		if limit, ok := asInt(input["limit"]); ok && limit > 0 {
+			end = start + limit - 1
 		}
-		return "read_file", out
+		cmd := fmt.Sprintf("sed -n '%d,%dp' %s", start, end, shellQuote(path))
+		return "shell_command", map[string]any{"command": cmd}
 	}
 	return strings.TrimSpace(name), input
 }
@@ -277,4 +273,30 @@ func asString(v any) string {
 	default:
 		return ""
 	}
+}
+
+func asInt(v any) (int, bool) {
+	switch x := v.(type) {
+	case int:
+		return x, true
+	case int64:
+		return int(x), true
+	case float64:
+		return int(x), true
+	case json.Number:
+		i, err := x.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(i), true
+	default:
+		return 0, false
+	}
+}
+
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }

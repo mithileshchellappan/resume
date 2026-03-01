@@ -46,17 +46,17 @@ func TestConvertMappingPairingAndOrphans(t *testing.T) {
 	}
 
 	// Check Bash mapping and rewritten call IDs.
-	var sawShell bool
+	var sawShellCommand bool
 	var sawOutput bool
 	var sawSynthetic bool
 	var sawOrphan bool
 	for _, it := range out.Items {
 		switch it.Kind {
 		case session.CodexItemFunctionCall:
-			if it.Name == "shell" {
-				sawShell = true
-				cmd, ok := it.Arguments["command"].([]any)
-				if !ok || len(cmd) != 3 {
+			if it.Name == "shell_command" && it.CallID == "call_aaaaaaaaaaaaaaaaaaaaaaaa" {
+				sawShellCommand = true
+				cmd, ok := it.Arguments["command"].(string)
+				if !ok || cmd != "ls -la" {
 					t.Fatalf("bad shell args: %#v", it.Arguments)
 				}
 			}
@@ -74,8 +74,8 @@ func TestConvertMappingPairingAndOrphans(t *testing.T) {
 		}
 	}
 
-	if !sawShell || !sawOutput || !sawSynthetic || !sawOrphan {
-		t.Fatalf("missing expected conversion artifacts: shell=%v output=%v synthetic=%v orphan=%v\nitems=%+v", sawShell, sawOutput, sawSynthetic, sawOrphan, out.Items)
+	if !sawShellCommand || !sawOutput || !sawSynthetic || !sawOrphan {
+		t.Fatalf("missing expected conversion artifacts: shell_command=%v output=%v synthetic=%v orphan=%v\nitems=%+v", sawShellCommand, sawOutput, sawSynthetic, sawOrphan, out.Items)
 	}
 }
 
@@ -119,10 +119,10 @@ func TestConvertNormalizesClaudeToolCallNamesAndArgs(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing glob call: %+v", out.Items)
 	}
-	if globCall.Name != "glob" {
+	if globCall.Name != "shell_command" {
 		t.Fatalf("glob name mismatch: %q", globCall.Name)
 	}
-	if globCall.Arguments["pattern"] != "**/*.go" || globCall.Arguments["path"] != "/repo" {
+	if globCall.Arguments["command"] != "rg --files -g '**/*.go' '/repo'" {
 		t.Fatalf("glob args mismatch: %#v", globCall.Arguments)
 	}
 
@@ -130,10 +130,10 @@ func TestConvertNormalizesClaudeToolCallNamesAndArgs(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing read call: %+v", out.Items)
 	}
-	if readCall.Name != "read_file" {
+	if readCall.Name != "shell_command" {
 		t.Fatalf("read name mismatch: %q", readCall.Name)
 	}
-	if readCall.Arguments["path"] != "/repo/go.mod" {
+	if readCall.Arguments["command"] != "sed -n '1,250p' '/repo/go.mod'" {
 		t.Fatalf("read args mismatch: %#v", readCall.Arguments)
 	}
 
@@ -141,11 +141,11 @@ func TestConvertNormalizesClaudeToolCallNamesAndArgs(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing bash call: %+v", out.Items)
 	}
-	if bashCall.Name != "shell" {
+	if bashCall.Name != "shell_command" {
 		t.Fatalf("bash name mismatch: %q", bashCall.Name)
 	}
-	cmd, ok := bashCall.Arguments["command"].([]any)
-	if !ok || len(cmd) != 3 || cmd[0] != "bash" || cmd[1] != "-lc" || cmd[2] != "git status --short" {
+	cmd, ok := bashCall.Arguments["command"].(string)
+	if !ok || cmd != "git status --short" {
 		t.Fatalf("bash command args mismatch: %#v", bashCall.Arguments)
 	}
 	if bashCall.Arguments["description"] != "show status" {

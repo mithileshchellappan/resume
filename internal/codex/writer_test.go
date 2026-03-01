@@ -80,6 +80,9 @@ func TestWriterWritesRolloutDBAndIndex(t *testing.T) {
 	scanner = bufio.NewScanner(f)
 	var sawAssistantResponse bool
 	var sawAssistantEvent bool
+	var sawTaskStarted bool
+	var sawTaskComplete bool
+	var turnIDFromStart string
 	for scanner.Scan() {
 		var m map[string]any
 		if err := json.Unmarshal(scanner.Bytes(), &m); err != nil {
@@ -102,6 +105,21 @@ func TestWriterWritesRolloutDBAndIndex(t *testing.T) {
 				}
 				sawAssistantEvent = true
 			}
+			if pType, _ := payload["type"].(string); pType == "task_started" {
+				sawTaskStarted = true
+				turnIDFromStart, _ = payload["turn_id"].(string)
+			}
+			if pType, _ := payload["type"].(string); pType == "task_complete" {
+				sawTaskComplete = true
+				if gotTurnID, _ := payload["turn_id"].(string); gotTurnID == "" {
+					t.Fatalf("task_complete missing turn_id")
+				}
+			}
+		}
+		if typ == "turn_context" && payload != nil {
+			if gotTurnID, _ := payload["turn_id"].(string); gotTurnID == "" {
+				t.Fatalf("turn_context missing turn_id")
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -109,6 +127,9 @@ func TestWriterWritesRolloutDBAndIndex(t *testing.T) {
 	}
 	if !sawAssistantResponse || !sawAssistantEvent {
 		t.Fatalf("missing assistant artifacts: response=%v event=%v", sawAssistantResponse, sawAssistantEvent)
+	}
+	if !sawTaskStarted || !sawTaskComplete || turnIDFromStart == "" {
+		t.Fatalf("missing task lifecycle events: started=%v complete=%v turn_id=%q", sawTaskStarted, sawTaskComplete, turnIDFromStart)
 	}
 
 	db, err := sql.Open("sqlite", stateDB)

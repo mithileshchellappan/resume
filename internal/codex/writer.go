@@ -176,6 +176,45 @@ func writeRolloutFile(path, threadID string, s session.CodexSession, meta sessio
 		return err
 	}
 
+	turnID := "turn_" + uuid.NewString()
+	taskStarted := map[string]any{
+		"timestamp": s.StartedAt.UTC().Format(time.RFC3339Nano),
+		"type":      "event_msg",
+		"payload": map[string]any{
+			"type":                    "task_started",
+			"turn_id":                 turnID,
+			"model_context_window":    258400,
+			"collaboration_mode_kind": "default",
+		},
+	}
+	if err := writeLine(taskStarted); err != nil {
+		return err
+	}
+
+	turnContext := map[string]any{
+		"timestamp": s.StartedAt.UTC().Format(time.RFC3339Nano),
+		"type":      "turn_context",
+		"payload": map[string]any{
+			"turn_id":         turnID,
+			"cwd":             meta.CWD,
+			"approval_policy": meta.ApprovalMode,
+			"sandbox_policy": map[string]any{
+				"type":                   "workspace-write",
+				"network_access":         false,
+				"exclude_tmpdir_env_var": false,
+				"exclude_slash_tmp":      false,
+			},
+			"model":       "gpt-5",
+			"personality": "pragmatic",
+			"effort":      "high",
+			"summary":     "auto",
+		},
+	}
+	if err := writeLine(turnContext); err != nil {
+		return err
+	}
+
+	lastAssistantMessage := ""
 	for _, item := range s.Items {
 		ts := item.Timestamp.UTC().Format(time.RFC3339Nano)
 		if item.Timestamp.IsZero() {
@@ -189,6 +228,9 @@ func writeRolloutFile(path, threadID string, s session.CodexSession, meta sessio
 		if err := writeLine(line); err != nil {
 			return err
 		}
+		if item.Kind == session.CodexItemAssistantText && strings.TrimSpace(item.Text) != "" {
+			lastAssistantMessage = item.Text
+		}
 		if eventPayload, ok := eventMsgPayloadFromItem(item); ok {
 			eventLine := map[string]any{
 				"timestamp": ts,
@@ -201,25 +243,16 @@ func writeRolloutFile(path, threadID string, s session.CodexSession, meta sessio
 		}
 	}
 
-	turnContext := map[string]any{
+	taskComplete := map[string]any{
 		"timestamp": s.StartedAt.UTC().Format(time.RFC3339Nano),
-		"type":      "turn_context",
+		"type":      "event_msg",
 		"payload": map[string]any{
-			"cwd":             meta.CWD,
-			"approval_policy": meta.ApprovalMode,
-			"sandbox_policy": map[string]any{
-				"mode":                   "workspace-write",
-				"writable_roots":         []string{meta.CWD},
-				"network_access":         false,
-				"exclude_tmpdir_env_var": false,
-				"exclude_slash_tmp":      false,
-			},
-			"model":   "gpt-5",
-			"effort":  "high",
-			"summary": "auto",
+			"type":               "task_complete",
+			"turn_id":            turnID,
+			"last_agent_message": lastAssistantMessage,
 		},
 	}
-	if err := writeLine(turnContext); err != nil {
+	if err := writeLine(taskComplete); err != nil {
 		return err
 	}
 
