@@ -42,6 +42,9 @@ Optional flags:
 - `--dry-run`
 
 When using the interactive picker in a real terminal, use arrow keys (`↑`/`↓`) or `j`/`k`, then press `Enter` to choose.
+After interactive selection and successful migration (non-`--dry-run`), `resume` automatically launches the target tool resume command:
+- `codex resume <thread_id>` for `claude -> codex`
+- `claude --resume <session_id>` for `codex -> claude`
 
 ## Exit Codes
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"time"
 
 	"github.com/mithileshchellappan/resume/internal/app"
@@ -37,6 +38,7 @@ func run(args []string) int {
 		return app.ExitOK
 	}
 
+	selectedViaPicker := false
 	if opts.ID == "" {
 		sessions, err := listSourceSessions(context.Background(), opts)
 		if err != nil {
@@ -60,6 +62,7 @@ func run(args []string) int {
 			return app.ExitUsage
 		}
 		opts.ID = picked.ID
+		selectedViaPicker = true
 		fmt.Fprintf(os.Stdout, "selected source session: %s [%s]\n", picked.Title, picked.ID)
 	}
 
@@ -79,6 +82,12 @@ func run(args []string) int {
 	} else {
 		fmt.Fprintf(os.Stdout, "session created: %s\nrollout: %s\n", result.ThreadID, result.RolloutPath)
 	}
+
+	if selectedViaPicker && !result.DryRun {
+		if openErr := launchTargetResume(opts.To, result); openErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: migrated session created but failed to open target CLI: %v\n", openErr)
+		}
+	}
 	return app.ExitOK
 }
 
@@ -90,6 +99,34 @@ func listSourceSessions(ctx context.Context, opts cli.Options) ([]session.Source
 		return codex.NewLoader(opts.CodexHome).ListSessions(ctx)
 	default:
 		return nil, fmt.Errorf("unsupported source tool: %s", opts.From)
+	}
+}
+
+func launchTargetResume(target string, result app.Result) error {
+	cmd := buildTargetResumeCommand(target, result)
+	if cmd == nil {
+		return nil
+	}
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func buildTargetResumeCommand(target string, result app.Result) *exec.Cmd {
+	switch target {
+	case "codex":
+		if result.ThreadID == "" {
+			return nil
+		}
+		return exec.Command("codex", "resume", result.ThreadID)
+	case "claude":
+		if result.SessionID == "" {
+			return nil
+		}
+		return exec.Command("claude", "--resume", result.SessionID)
+	default:
+		return nil
 	}
 }
 
