@@ -53,8 +53,8 @@ func Parse(args []string) (Options, error) {
 	opts := Options{}
 	fs := NewFlagSet()
 
-	fs.StringVar(&opts.From, "from", "", "source tool (required: claude)")
-	fs.StringVar(&opts.To, "to", "", "target tool (required: codex)")
+	fs.StringVar(&opts.From, "from", "", "source tool (required)")
+	fs.StringVar(&opts.To, "to", "", "target tool (required)")
 	fs.StringVar(&opts.ID, "id", "", "source session id (required)")
 	fs.StringVar(&opts.ClaudeHome, "claude-home", filepath.Join(home, ".claude"), "Claude home directory")
 	fs.StringVar(&opts.CodexHome, "codex-home", filepath.Join(home, ".codex"), "Codex home directory")
@@ -81,8 +81,8 @@ func Parse(args []string) (Options, error) {
 	if opts.From == "" || opts.To == "" || opts.ID == "" {
 		return Options{}, UsageError{Msg: "missing required flags: --from, --to, --id"}
 	}
-	if opts.From != "claude" || opts.To != "codex" {
-		return Options{}, UsageError{Msg: "POC currently supports only --from claude --to codex"}
+	if !isSupportedDirection(opts.From, opts.To) {
+		return Options{}, UsageError{Msg: "supported directions: --from claude --to codex OR --from codex --to claude"}
 	}
 
 	opts.ClaudeHome = expandHome(opts.ClaudeHome, home)
@@ -102,4 +102,8 @@ func expandHome(path, home string) string {
 		return filepath.Join(home, strings.TrimPrefix(path, "~/"))
 	}
 	return path
+}
+
+func isSupportedDirection(from, to string) bool {
+	return (from == "claude" && to == "codex") || (from == "codex" && to == "claude")
 }

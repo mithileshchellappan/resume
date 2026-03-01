@@ -9,7 +9,7 @@ func TestParseUsageErrors(t *testing.T) {
 	}{
 		{name: "missing all", args: []string{}},
 		{name: "missing id", args: []string{"--from", "claude", "--to", "codex"}},
-		{name: "unsupported direction", args: []string{"--from", "codex", "--to", "claude", "--id", "x"}},
+		{name: "unsupported direction", args: []string{"--from", "claude", "--to", "claude", "--id", "x"}},
 	}
 
 	for _, tt := range tests {
@@ -54,5 +54,13 @@ func TestParseValidAndHelpVersion(t *testing.T) {
 	}
 	if opts.ClaudeHome == "" || opts.CodexHome == "" {
 		t.Fatalf("expected default homes")
+	}
+
+	opts, err = Parse([]string{"--from", "codex", "--to", "claude", "--id", "thread-1", "--dry-run"})
+	if err != nil {
+		t.Fatalf("parse reverse valid: %v", err)
+	}
+	if opts.From != "codex" || opts.To != "claude" || opts.ID != "thread-1" {
+		t.Fatalf("unexpected reverse opts: %+v", opts)
 	}
 }

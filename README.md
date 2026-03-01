@@ -1,10 +1,12 @@
 # resume
 
-`resume` is a Go CLI POC that converts a Claude session into a native Codex session so it appears in Codex resume flows.
+`resume` is a Go CLI POC that converts sessions between Claude and Codex native stores.
 
 ## Scope (POC)
 
-- Direction supported: `claude -> codex`
+- Directions supported:
+  - `claude -> codex`
+  - `codex -> claude`
 - No TUI; strict flag-based CLI
 - Writes to native Codex stores (`sessions/`, `state_*.sqlite`, `session_index.jsonl`)
 - No compaction in this POC
@@ -17,6 +19,7 @@
 
 ```bash
 resume --from claude --to codex --id <claude_session_id>
+resume --from codex --to claude --id <codex_thread_id>
 ```
 
 Optional flags:

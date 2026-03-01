@@ -44,18 +44,23 @@ func run(args []string) int {
 
 	b, _ := json.Marshal(result)
 	fmt.Fprintln(os.Stdout, string(b))
-	fmt.Fprintf(os.Stdout, "session created: %s\nrollout: %s\n", result.ThreadID, result.RolloutPath)
+	if result.SessionID != "" {
+		fmt.Fprintf(os.Stdout, "session created: %s\nsession path: %s\n", result.SessionID, result.SessionPath)
+	} else {
+		fmt.Fprintf(os.Stdout, "session created: %s\nrollout: %s\n", result.ThreadID, result.RolloutPath)
+	}
 	return app.ExitOK
 }
 
 func printUsage(w *os.File) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  resume --from claude --to codex --id <claude_session_id> [--claude-home <path>] [--codex-home <path>] [--cwd <target_cwd>] [--title <thread_title>] [--dry-run]")
+	fmt.Fprintln(w, "  resume --from codex --to claude --id <codex_thread_id> [--claude-home <path>] [--codex-home <path>] [--cwd <target_cwd>] [--title <session_title>] [--dry-run]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
-	fmt.Fprintln(w, "  --from         Source tool (required: claude)")
-	fmt.Fprintln(w, "  --to           Target tool (required: codex)")
-	fmt.Fprintln(w, "  --id           Source Claude session id (required)")
+	fmt.Fprintln(w, "  --from         Source tool (required)")
+	fmt.Fprintln(w, "  --to           Target tool (required)")
+	fmt.Fprintln(w, "  --id           Source session/thread id (required)")
 	fmt.Fprintln(w, "  --claude-home  Claude home directory (default ~/.claude)")
 	fmt.Fprintln(w, "  --codex-home   Codex home directory (default ~/.codex)")
 	fmt.Fprintln(w, "  --cwd          Override target cwd")

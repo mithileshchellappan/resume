@@ -103,6 +103,13 @@ type CodexThreadMeta struct {
 	FirstUserMessage  string
 }
 
+// ClaudeSessionMeta is metadata used when persisting a Claude-native session.
+type ClaudeSessionMeta struct {
+	CWD       string
+	Title     string
+	GitBranch string
+}
+
 // Converter converts IR into a target Codex session.
 type Converter interface {
 	Convert(ctx context.Context, in SessionIR) (CodexSession, error)
@@ -116,4 +123,14 @@ type ClaudeLoader interface {
 // CodexWriter writes a Codex session into native Codex stores.
 type CodexWriter interface {
 	Write(ctx context.Context, s CodexSession, meta CodexThreadMeta) (threadID string, rolloutPath string, err error)
+}
+
+// CodexLoader loads Codex native session into IR.
+type CodexLoader interface {
+	LoadByThreadID(ctx context.Context, id string) (SessionIR, error)
+}
+
+// ClaudeWriter writes a Claude session into native Claude stores.
+type ClaudeWriter interface {
+	Write(ctx context.Context, in SessionIR, meta ClaudeSessionMeta) (sessionID string, sessionPath string, err error)
 }
