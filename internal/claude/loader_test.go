@@ -178,6 +178,146 @@ func TestLoaderIgnoresLocalCommandEnvelopeMessages(t *testing.T) {
 	}
 }
 
+func TestLoaderParsesServerToolUseBlocks(t *testing.T) {
+	home := t.TempDir()
+	projectDir := filepath.Join(home, "projects", "proj-server-tools")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionPath := filepath.Join(projectDir, "sess-server-tools.jsonl")
+
+	sessionContent := "" +
+		`{"type":"user","timestamp":"2026-03-01T08:00:00Z","cwd":"/repo","sessionId":"sess-server-tools","message":{"role":"user","content":"search for Go tutorials"}}` + "\n" +
+		`{"type":"assistant","timestamp":"2026-03-01T08:00:01Z","message":{"role":"assistant","content":[{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"Go tutorials"}},{"type":"text","text":"Let me search for that."}]}}` + "\n" +
+		`{"type":"user","timestamp":"2026-03-01T08:00:02Z","message":{"role":"user","content":[{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://go.dev/tour","title":"A Tour of Go","snippet":"Interactive Go tutorial"}]}]}}` + "\n"
+	if err := os.WriteFile(sessionPath, []byte(sessionContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	indexJSON := `{"version":1,"entries":[{"sessionId":"sess-server-tools","fullPath":"` + sessionPath + `"}]}`
+	if err := os.WriteFile(filepath.Join(projectDir, "sessions-index.json"), []byte(indexJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewLoader(home)
+	ir, err := loader.LoadBySessionID(context.Background(), "sess-server-tools")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(ir.Calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(ir.Calls))
+	}
+	if ir.Calls[0].Name != "web_search" {
+		t.Fatalf("expected web_search tool call, got %q", ir.Calls[0].Name)
+	}
+	if ir.Calls[0].SourceID != "srvtoolu_1" {
+		t.Fatalf("expected source id srvtoolu_1, got %q", ir.Calls[0].SourceID)
+	}
+	if len(ir.Results) != 1 {
+		t.Fatalf("expected 1 tool result, got %d", len(ir.Results))
+	}
+	if ir.Results[0].CallSourceID != "srvtoolu_1" {
+		t.Fatalf("result call source id mismatch: %q", ir.Results[0].CallSourceID)
+	}
+	if ir.Results[0].Output == "" {
+		t.Fatalf("expected non-empty result output")
+	}
+	// Should have: user_message, tool_call, assistant_message (text), tool_result
+	if len(ir.OrderedEvents) != 4 {
+		t.Fatalf("expected 4 ordered events, got %d: %+v", len(ir.OrderedEvents), ir.OrderedEvents)
+	}
+}
+
+func TestLoaderAttachesThinkingAcrossJSONLLines(t *testing.T) {
+	home := t.TempDir()
+	projectDir := filepath.Join(home, "projects", "proj-cross-line-thinking")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionPath := filepath.Join(projectDir, "sess-thinking.jsonl")
+
+	// Claude emits thinking and text as separate JSONL lines.
+	sessionContent := "" +
+		`{"type":"user","timestamp":"2026-03-01T08:00:00Z","cwd":"/repo","sessionId":"sess-thinking","message":{"role":"user","content":"explain this code"}}` + "\n" +
+		`{"type":"assistant","timestamp":"2026-03-01T08:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Let me analyze the structure first."}]}}` + "\n" +
+		`{"type":"assistant","timestamp":"2026-03-01T08:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Here is the explanation."}]}}` + "\n"
+	if err := os.WriteFile(sessionPath, []byte(sessionContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	indexJSON := `{"version":1,"entries":[{"sessionId":"sess-thinking","fullPath":"` + sessionPath + `"}]}`
+	if err := os.WriteFile(filepath.Join(projectDir, "sessions-index.json"), []byte(indexJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewLoader(home)
+	ir, err := loader.LoadBySessionID(context.Background(), "sess-thinking")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Should have 2 messages: user + assistant.
+	if len(ir.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %+v", len(ir.Messages), ir.Messages)
+	}
+
+	assistant := ir.Messages[1]
+	if assistant.Content != "Here is the explanation." {
+		t.Fatalf("assistant content mismatch: %q", assistant.Content)
+	}
+	if assistant.Reasoning != "Let me analyze the structure first." {
+		t.Fatalf("reasoning not attached across JSONL lines: got %q", assistant.Reasoning)
+	}
+}
+
+func TestLoaderDoesNotAttachAssistantThinkingToUserMessages(t *testing.T) {
+	home := t.TempDir()
+	projectDir := filepath.Join(home, "projects", "proj-reasoning-boundary")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionPath := filepath.Join(projectDir, "sess-reasoning-boundary.jsonl")
+
+	sessionContent := "" +
+		`{"type":"user","timestamp":"2026-03-01T08:00:00Z","cwd":"/repo","sessionId":"sess-reasoning-boundary","message":{"role":"user","content":"start"}}` + "\n" +
+		`{"type":"assistant","timestamp":"2026-03-01T08:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"private plan"}]}}` + "\n" +
+		`{"type":"user","timestamp":"2026-03-01T08:00:02Z","message":{"role":"user","content":"Actually, new request"}}` + "\n" +
+		`{"type":"assistant","timestamp":"2026-03-01T08:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"Sure."}]}}` + "\n"
+	if err := os.WriteFile(sessionPath, []byte(sessionContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	indexJSON := `{"version":1,"entries":[{"sessionId":"sess-reasoning-boundary","fullPath":"` + sessionPath + `"}]}`
+	if err := os.WriteFile(filepath.Join(projectDir, "sessions-index.json"), []byte(indexJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewLoader(home)
+	ir, err := loader.LoadBySessionID(context.Background(), "sess-reasoning-boundary")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(ir.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %+v", len(ir.Messages), ir.Messages)
+	}
+
+	second := ir.Messages[1]
+	if second.Role != "user" {
+		t.Fatalf("expected second message to be user, got role=%q", second.Role)
+	}
+	if second.Reasoning != "" {
+		t.Fatalf("user message should not inherit assistant reasoning: got %q", second.Reasoning)
+	}
+
+	third := ir.Messages[2]
+	if third.Role != "assistant" {
+		t.Fatalf("expected third message to be assistant, got role=%q", third.Role)
+	}
+	if third.Reasoning != "" {
+		t.Fatalf("stale reasoning should be cleared before next assistant text: got %q", third.Reasoning)
+	}
+}
+
 func TestLoaderListSessions(t *testing.T) {
 	home := t.TempDir()
 	projectDir := filepath.Join(home, "projects", "proj-list")

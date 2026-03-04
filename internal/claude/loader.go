@@ -225,6 +225,7 @@ func (l *Loader) loadSessionFile(ctx context.Context, requestedID, path string) 
 
 	callIndex := 0
 	missingCallIDCounter := 0
+	pendingReasoning := ""
 
 	for scanner.Scan() {
 		select {
@@ -269,7 +270,6 @@ func (l *Loader) loadSessionFile(ctx context.Context, requestedID, path string) 
 		}
 
 		items := parseContent(msg.Content)
-		pendingReasoning := ""
 		for _, item := range items {
 			switch item.Kind {
 			case "reasoning":
@@ -282,11 +282,19 @@ func (l *Loader) loadSessionFile(ctx context.Context, requestedID, path string) 
 				if role == "user" && isLocalCommandEnvelopeMessage(item.Text) {
 					continue
 				}
+				reasoning := ""
+				if role == "assistant" {
+					reasoning = pendingReasoning
+					pendingReasoning = ""
+				} else if role == "user" {
+					// Drop stale assistant reasoning at an explicit user turn boundary.
+					pendingReasoning = ""
+				}
 				m := session.Message{
 					Role:      role,
 					Content:   item.Text,
 					Timestamp: ts,
-					Reasoning: pendingReasoning,
+					Reasoning: reasoning,
 				}
 				ir.Messages = append(ir.Messages, m)
 				kind := session.EventAssistantMessage
@@ -481,7 +489,7 @@ func parseContentItem(item map[string]any) []contentItem {
 		return []contentItem{{Kind: "text", Text: strings.TrimSpace(asString(item["text"]))}}
 	case "thinking":
 		return []contentItem{{Kind: "reasoning", Reasoning: strings.TrimSpace(asString(item["thinking"]))}}
-	case "tool_use":
+	case "tool_use", "server_tool_use":
 		input := map[string]any{}
 		if raw, ok := item["input"].(map[string]any); ok {
 			input = raw
@@ -492,7 +500,7 @@ func parseContentItem(item map[string]any) []contentItem {
 			ToolName:  strings.TrimSpace(asString(item["name"])),
 			ToolInput: input,
 		}}
-	case "tool_result":
+	case "tool_result", "web_search_tool_result":
 		return []contentItem{{
 			Kind:         "tool_result",
 			ToolResultID: strings.TrimSpace(asString(item["tool_use_id"])),

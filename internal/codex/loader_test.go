@@ -76,6 +76,63 @@ func TestLoaderLoadByThreadID(t *testing.T) {
 	}
 }
 
+func TestLoaderParsesAssistantThinkingIntoReasoning(t *testing.T) {
+	home := t.TempDir()
+	stateDB := filepath.Join(home, "state_1.sqlite")
+	createThreadsSchema(t, stateDB)
+
+	threadID := "thread-thinking"
+	rolloutPath := filepath.Join(home, "sessions", "2026", "03", "01", "rollout-thinking.jsonl")
+	if err := os.MkdirAll(filepath.Dir(rolloutPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rollout := "" +
+		`{"timestamp":"2026-03-01T08:00:00Z","type":"session_meta","payload":{"id":"thread-thinking","cwd":"/repo","timestamp":"2026-03-01T08:00:00Z"}}` + "\n" +
+		`{"timestamp":"2026-03-01T08:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}` + "\n" +
+		`{"timestamp":"2026-03-01T08:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"thinking","thinking":"Let me inspect this first."},{"type":"output_text","text":"done"}],"phase":"final_answer"}}` + "\n"
+	if err := os.WriteFile(rolloutPath, []byte(rollout), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", stateDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	createdAt := time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC).Unix()
+	_, err = db.Exec(`INSERT INTO threads (
+		id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+		sandbox_policy, approval_mode, tokens_used, has_user_event, archived,
+		archived_at, git_sha, git_branch, git_origin_url, cli_version, first_user_message
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		threadID, rolloutPath, createdAt, createdAt, "cli", "openai", "/repo", "title",
+		"{}", "on-request", 0, 1, 0, nil, nil, nil, nil, "test", "hello",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewLoader(home)
+	ir, err := loader.LoadByThreadID(context.Background(), threadID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(ir.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %+v", len(ir.Messages), ir.Messages)
+	}
+	assistant := ir.Messages[1]
+	if assistant.Role != "assistant" {
+		t.Fatalf("expected assistant role, got %q", assistant.Role)
+	}
+	if assistant.Content != "done" {
+		t.Fatalf("assistant content mismatch: %q", assistant.Content)
+	}
+	if assistant.Reasoning != "Let me inspect this first." {
+		t.Fatalf("assistant reasoning mismatch: %q", assistant.Reasoning)
+	}
+}
+
 func TestLoaderThreadNotFound(t *testing.T) {
 	home := t.TempDir()
 	loader := NewLoader(home)

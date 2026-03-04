@@ -208,8 +208,9 @@ type responseItemPayload struct {
 }
 
 type contentPart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	Thinking string `json:"thinking"`
 }
 
 func (l *Loader) loadRollout(ctx context.Context, threadID, rolloutPath, fallbackCWD string, createdAt int64) (session.SessionIR, error) {
@@ -286,7 +287,22 @@ func (l *Loader) loadRollout(ctx context.Context, threadID, rolloutPath, fallbac
 					continue
 				}
 				parts := parseContentParts(p.Content)
+				pendingReasoning := ""
 				for _, part := range parts {
+					partType := strings.TrimSpace(strings.ToLower(part.Type))
+					if partType == "thinking" {
+						thinking := strings.TrimSpace(part.Thinking)
+						if thinking == "" {
+							continue
+						}
+						if pendingReasoning == "" {
+							pendingReasoning = thinking
+						} else {
+							pendingReasoning += "\n" + thinking
+						}
+						continue
+					}
+
 					text := strings.TrimSpace(part.Text)
 					if text == "" {
 						continue
@@ -298,6 +314,10 @@ func (l *Loader) loadRollout(ctx context.Context, threadID, rolloutPath, fallbac
 						Role:      role,
 						Content:   text,
 						Timestamp: chooseCodexTS(ts, ir.StartedAt),
+					}
+					if role == "assistant" && pendingReasoning != "" {
+						msg.Reasoning = pendingReasoning
+						pendingReasoning = ""
 					}
 					ir.Messages = append(ir.Messages, msg)
 					msgCopy := msg
