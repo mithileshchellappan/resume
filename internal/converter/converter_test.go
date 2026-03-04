@@ -176,6 +176,65 @@ func TestConvertNormalizesClaudeToolCallNamesAndArgs(t *testing.T) {
 	}
 }
 
+func TestConvertPreservesReasoningOnAssistantMessages(t *testing.T) {
+	ts := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	ir := session.SessionIR{
+		SourceID:  "sess-reason",
+		CWD:       "/repo",
+		StartedAt: ts,
+		OrderedEvents: []session.Event{
+			{Kind: session.EventUserMessage, Msg: &session.Message{Role: "user", Content: "explain this code", Timestamp: ts}},
+			{Kind: session.EventAssistantMessage, Msg: &session.Message{Role: "assistant", Content: "Here is the explanation.", Reasoning: "Let me analyze the code structure first.", Timestamp: ts.Add(time.Second)}},
+		},
+	}
+
+	conv := &Converter{IDGen: &fakeGen{ids: []string{}}, Now: func() time.Time { return ts }}
+	out, err := conv.Convert(context.Background(), ir)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+
+	var foundAssistant bool
+	for _, it := range out.Items {
+		if it.Kind == session.CodexItemAssistantText {
+			foundAssistant = true
+			if it.Text != "Here is the explanation." {
+				t.Fatalf("assistant text mismatch: %q", it.Text)
+			}
+			if it.Reasoning != "Let me analyze the code structure first." {
+				t.Fatalf("reasoning not preserved: %q", it.Reasoning)
+			}
+		}
+	}
+	if !foundAssistant {
+		t.Fatalf("no assistant item found")
+	}
+}
+
+func TestConvertEmptyReasoningNotSet(t *testing.T) {
+	ts := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	ir := session.SessionIR{
+		SourceID:  "sess-noreason",
+		CWD:       "/repo",
+		StartedAt: ts,
+		OrderedEvents: []session.Event{
+			{Kind: session.EventAssistantMessage, Msg: &session.Message{Role: "assistant", Content: "plain reply", Timestamp: ts}},
+		},
+	}
+
+	conv := &Converter{IDGen: &fakeGen{ids: []string{}}, Now: func() time.Time { return ts }}
+	out, err := conv.Convert(context.Background(), ir)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+
+	for _, it := range out.Items {
+		if it.Kind == session.CodexItemAssistantText && it.Reasoning != "" {
+			t.Fatalf("unexpected reasoning on plain message: %q", it.Reasoning)
+		}
+	}
+}
+
 func TestNormalizeClaudeSubagentType(t *testing.T) {
 	tests := []struct {
 		in   string

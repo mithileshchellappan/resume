@@ -85,6 +85,7 @@ type CodexItem struct {
 	Kind      CodexItemKind
 	Role      string
 	Text      string
+	Reasoning string
 	CallID    string
 	Name      string
 	Arguments map[string]any

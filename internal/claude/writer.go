@@ -157,16 +157,25 @@ func writeSessionJSONL(path, sessionID, cwd, gitBranch string, startedAt time.Ti
 			if ev.Msg == nil || strings.TrimSpace(ev.Msg.Content) == "" {
 				continue
 			}
+			contentBlocks := []map[string]any{}
+			if reasoning := strings.TrimSpace(ev.Msg.Reasoning); reasoning != "" {
+				contentBlocks = append(contentBlocks, map[string]any{
+					"type":     "thinking",
+					"thinking": reasoning,
+				})
+			}
+			contentBlocks = append(contentBlocks, map[string]any{
+				"type": "text",
+				"text": strings.TrimSpace(ev.Msg.Content),
+			})
 			line := cloneMap(base)
 			line["type"] = "assistant"
 			line["message"] = map[string]any{
-				"model": "claude-opus-4-6",
-				"id":    "msg_" + strings.ReplaceAll(uuid.NewString(), "-", ""),
-				"type":  "message",
-				"role":  "assistant",
-				"content": []map[string]any{
-					{"type": "text", "text": strings.TrimSpace(ev.Msg.Content)},
-				},
+				"model":         "claude-opus-4-6",
+				"id":            "msg_" + strings.ReplaceAll(uuid.NewString(), "-", ""),
+				"type":          "message",
+				"role":          "assistant",
+				"content":       contentBlocks,
 				"stop_reason":   nil,
 				"stop_sequence": nil,
 			}

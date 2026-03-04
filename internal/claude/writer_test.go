@@ -975,6 +975,94 @@ func TestTruncateForContextAvoidsNestedMarkers(t *testing.T) {
 	}
 }
 
+func TestWriterEmitsThinkingBlocksForReasoningMessages(t *testing.T) {
+	home := t.TempDir()
+	w := NewWriter(home)
+	now := time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC)
+	w.Now = func() time.Time { return now }
+
+	ir := session.SessionIR{
+		SourceID:  "codex-thread-thinking",
+		CWD:       "/Users/mithilesh/Code/clis/resume",
+		StartedAt: now,
+		OrderedEvents: []session.Event{
+			{Kind: session.EventUserMessage, Msg: &session.Message{Role: "user", Content: "explain this", Timestamp: now}},
+			{Kind: session.EventAssistantMessage, Msg: &session.Message{Role: "assistant", Content: "Here is the explanation.", Reasoning: "Let me think about the code structure.", Timestamp: now.Add(time.Second)}},
+			{Kind: session.EventAssistantMessage, Msg: &session.Message{Role: "assistant", Content: "plain reply", Timestamp: now.Add(2 * time.Second)}},
+		},
+	}
+
+	_, sessionPath, err := w.Write(context.Background(), ir, session.ClaudeSessionMeta{CWD: ir.CWD})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f, err := os.Open(sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var sawThinking bool
+	var sawPlain bool
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var line map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			t.Fatalf("bad json: %v", err)
+		}
+		lineType, _ := line["type"].(string)
+		if lineType != "assistant" {
+			continue
+		}
+		msg, _ := line["message"].(map[string]any)
+		if msg == nil {
+			continue
+		}
+		content, _ := msg["content"].([]any)
+		if len(content) == 0 {
+			continue
+		}
+		first, _ := content[0].(map[string]any)
+		if first == nil {
+			continue
+		}
+		kind, _ := first["type"].(string)
+		if kind == "thinking" {
+			sawThinking = true
+			thinking, _ := first["thinking"].(string)
+			if thinking != "Let me think about the code structure." {
+				t.Fatalf("thinking content mismatch: %q", thinking)
+			}
+			if len(content) < 2 {
+				t.Fatalf("expected text block after thinking, got %d blocks", len(content))
+			}
+			textBlock, _ := content[1].(map[string]any)
+			text, _ := textBlock["text"].(string)
+			if text != "Here is the explanation." {
+				t.Fatalf("text after thinking mismatch: %q", text)
+			}
+		} else if kind == "text" {
+			text, _ := first["text"].(string)
+			if text == "plain reply" {
+				sawPlain = true
+				if len(content) != 1 {
+					t.Fatalf("plain message should have exactly 1 content block, got %d", len(content))
+				}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !sawThinking {
+		t.Fatalf("missing assistant message with thinking block")
+	}
+	if !sawPlain {
+		t.Fatalf("missing plain assistant message without thinking")
+	}
+}
+
 func TestNormalizeEventsForClaudeContextDoesNotMutateInput(t *testing.T) {
 	huge := strings.Repeat("B", 5000)
 	events := []session.Event{

@@ -108,6 +108,7 @@ func (c *Converter) Convert(ctx context.Context, in session.SessionIR) (session.
 			} else {
 				item.Kind = session.CodexItemAssistantText
 				item.Role = "assistant"
+				item.Reasoning = strings.TrimSpace(ev.Msg.Reasoning)
 			}
 			out.Items = append(out.Items, item)
 

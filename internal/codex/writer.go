@@ -284,14 +284,22 @@ func payloadFromItem(item session.CodexItem) map[string]any {
 			}},
 		}
 	case session.CodexItemAssistantText:
+		content := []map[string]any{}
+		if strings.TrimSpace(item.Reasoning) != "" {
+			content = append(content, map[string]any{
+				"type":     "thinking",
+				"thinking": strings.TrimSpace(item.Reasoning),
+			})
+		}
+		content = append(content, map[string]any{
+			"type": "output_text",
+			"text": item.Text,
+		})
 		return map[string]any{
-			"type": "message",
-			"role": "assistant",
-			"content": []map[string]any{{
-				"type": "output_text",
-				"text": item.Text,
-			}},
-			"phase": "final_answer",
+			"type":    "message",
+			"role":    "assistant",
+			"content": content,
+			"phase":   "final_answer",
 		}
 	case session.CodexItemFunctionCall:
 		argJSON, _ := json.Marshal(item.Arguments)

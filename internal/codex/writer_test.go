@@ -155,6 +155,103 @@ func TestWriterWritesRolloutDBAndIndex(t *testing.T) {
 	}
 }
 
+func TestWriterRendersReasoningInAssistantMessages(t *testing.T) {
+	home := t.TempDir()
+	stateDB := filepath.Join(home, "state_1.sqlite")
+	createThreadsSchema(t, stateDB)
+
+	w := NewWriter(home)
+	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	w.Now = func() time.Time { return now }
+
+	s := session.CodexSession{
+		SourceSessionID:  "sess-think",
+		CWD:              "/repo",
+		StartedAt:        now,
+		HasUserEvent:     true,
+		FirstUserMessage: "explain this",
+		Items: []session.CodexItem{
+			{Kind: session.CodexItemUserMessage, Role: "user", Text: "explain this", Timestamp: now},
+			{Kind: session.CodexItemAssistantText, Role: "assistant", Text: "Here is the explanation.", Reasoning: "Let me analyze the code structure.", Timestamp: now},
+			{Kind: session.CodexItemAssistantText, Role: "assistant", Text: "plain reply", Timestamp: now},
+		},
+	}
+
+	meta := session.CodexThreadMeta{CWD: "/repo", Title: "explain this"}
+	_, rolloutPath, err := w.Write(context.Background(), s, meta)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f, err := os.Open(rolloutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var sawThinkingAssistant bool
+	var sawPlainAssistant bool
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var m map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &m); err != nil {
+			t.Fatalf("bad json: %v", err)
+		}
+		typ, _ := m["type"].(string)
+		if typ != "response_item" {
+			continue
+		}
+		payload, _ := m["payload"].(map[string]any)
+		if payload == nil {
+			continue
+		}
+		role, _ := payload["role"].(string)
+		if role != "assistant" {
+			continue
+		}
+		content, _ := payload["content"].([]any)
+		if len(content) == 0 {
+			continue
+		}
+		// Check if the first content block is a thinking block.
+		firstBlock, _ := content[0].(map[string]any)
+		if firstBlock == nil {
+			continue
+		}
+		blockType, _ := firstBlock["type"].(string)
+		if blockType == "thinking" {
+			sawThinkingAssistant = true
+			thinking, _ := firstBlock["thinking"].(string)
+			if thinking != "Let me analyze the code structure." {
+				t.Fatalf("thinking content mismatch: %q", thinking)
+			}
+			// Should also have the text block after.
+			if len(content) < 2 {
+				t.Fatalf("expected text block after thinking, got %d blocks", len(content))
+			}
+			textBlock, _ := content[1].(map[string]any)
+			text, _ := textBlock["text"].(string)
+			if text != "Here is the explanation." {
+				t.Fatalf("text after thinking mismatch: %q", text)
+			}
+		} else if blockType == "output_text" {
+			text, _ := firstBlock["text"].(string)
+			if text == "plain reply" {
+				sawPlainAssistant = true
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !sawThinkingAssistant {
+		t.Fatalf("missing assistant message with thinking block")
+	}
+	if !sawPlainAssistant {
+		t.Fatalf("missing plain assistant message without thinking")
+	}
+}
+
 func createThreadsSchema(t *testing.T, dbPath string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", dbPath)
